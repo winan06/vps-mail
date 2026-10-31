@@ -1,0 +1,23 @@
+{
+    "name": "mailhost/app",
+    "description": "Database layer and CLI for the self-hosted multi-domain mail system",
+    "type": "project",
+    "require": {
+        "php": ">=8.3",
+        "ext-pdo_mysql": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Mailhost\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Mailhost\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test:unit": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration"
+    }
+}
