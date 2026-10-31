@@ -1,0 +1,85 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Mailhost\Cli\EnvFile;
+use Mailhost\Db\Connection;
+use Mailhost\Db\Migrator;
+
+$autoload = __DIR__ . '/../vendor/autoload.php';
+if (!is_file($autoload)) {
+    fwrite(STDERR, "mailhostctl: dependencies are not installed (run composer install in " . dirname(__DIR__) . ")\n");
+    exit(1);
+}
+require $autoload;
+
+// Warnings and notices must not slip past the error handling below as text on stdout.
+set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+    if ((error_reporting() & $severity) === 0) {
+        return false;
+    }
+
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
+
+/** An environment variable, or $default when it is unset or empty. */
+function setting(string $name, string $default): string
+{
+    $value = getenv($name);
+
+    return $value === false || $value === '' ? $default : $value;
+}
+
+$usage = <<<'TXT'
+Usage: mailhostctl <command>
+
+Commands:
+  migrate         Create the database if needed and apply pending migrations
+  migrate:status  Show which migrations are applied or pending
+  db:users        Manage database users
+
+Environment:
+  MAILHOST_DB_ENV          env file with the database settings (default /etc/mailhost/db.env)
+  MAILHOST_MIGRATIONS_DIR  directory with the migration files (default app/migrations)
+
+TXT;
+
+try {
+    $command = $argv[1] ?? '';
+
+    switch ($command) {
+        case 'migrate':
+        case 'migrate:status':
+            $env = EnvFile::load(setting('MAILHOST_DB_ENV', '/etc/mailhost/db.env'));
+            $migrations = setting('MAILHOST_MIGRATIONS_DIR', __DIR__ . '/../migrations');
+
+            if ($command === 'migrate') {
+                Connection::ensureDatabase(Connection::root($env, false), $env['DB_NAME'] ?? 'mailhost');
+                $applied = (new Migrator(Connection::root($env), $migrations))->migrate();
+
+                if ($applied === []) {
+                    echo "Nothing to migrate.\n";
+                }
+                foreach ($applied as $version) {
+                    echo "Applied: $version\n";
+                }
+            } else {
+                foreach ((new Migrator(Connection::root($env), $migrations))->status() as $version => $state) {
+                    echo "$version  $state\n";
+                }
+            }
+            break;
+
+        case 'db:users':
+            fwrite(STDERR, "mailhostctl: Not implemented\n");
+            exit(1);
+
+        default:
+            fwrite(STDERR, $usage);
+            exit(1);
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, 'mailhostctl: ' . $e->getMessage() . "\n");
+    exit(1);
+}
