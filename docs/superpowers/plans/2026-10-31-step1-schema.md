@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Location:** repo root is `/home/claude/mailhost`. All PHP lives under `app/`, with namespace `Mailhost\` (PSR-4 → `app/src/`). Every file starts with `declare(strict_types=1);`.
+- **Location:** repo root is `/home/claude/vps-mail`. All PHP lives under `app/`, with namespace `Mailhost\` (PSR-4 → `app/src/`). Every file starts with `declare(strict_types=1);`.
 - **Database:** name `mailhost`, `utf8mb4` / `utf8mb4_unicode_ci`, InnoDB.
 - **Identifiers:** domain names, local parts, email addresses, hashes and tokens use `CHARACTER SET ascii COLLATE ascii_bin` and must be lowercase, enforced by `CHECK (col = LOWER(col))`. Callers lowercase before lookup; Postfix does this itself, and Dovecot will use `%Lu` in step 2.
 - **Times are UTC:** columns are `DATETIME`, and every connection runs `SET time_zone = '+00:00'`.
