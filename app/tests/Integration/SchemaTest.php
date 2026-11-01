@@ -350,6 +350,7 @@ final class SchemaTest extends DbTestCase
             'domain with an underscore' => ['INSERT INTO domains (name) VALUES (?)', ['bad_name.com']],
             'domain starting with a hyphen' => ['INSERT INTO domains (name) VALUES (?)', ['-bad.com']],
             'domain ending with a dot' => ['INSERT INTO domains (name) VALUES (?)', ['bad.com.']],
+            'domain with a trailing newline' => ['INSERT INTO domains (name) VALUES (?)', ["example.com\n"]],
             'alias domain in uppercase' => [
                 "INSERT INTO domain_aliases (alias_domain, target_domain_id) VALUES (?, $domain)",
                 ['Alias.net'],
@@ -362,9 +363,17 @@ final class SchemaTest extends DbTestCase
                 "INSERT INTO dkim_keys (domain_id, selector, public_key) VALUES ($domain, ?, 'KEY')",
                 ['mail_1'],
             ],
+            'dkim selector with a trailing newline' => [
+                "INSERT INTO dkim_keys (domain_id, selector, public_key) VALUES ($domain, ?, 'KEY')",
+                ["mail\n"],
+            ],
             'mailbox local part with a space' => [
                 "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
                 ['a b'],
+            ],
+            'mailbox local part with a trailing newline' => [
+                "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
+                ["alice\n"],
             ],
             'mailbox local part empty' => [
                 "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
@@ -406,14 +415,44 @@ final class SchemaTest extends DbTestCase
             ],
             'admin username too short' => [$admin, ['ab', 'ab@example.com', self::HASH_ARGON]],
             'admin username in uppercase' => [$admin, ['Admin1', 'admin1@example.com', self::HASH_ARGON]],
+            'admin username with a trailing newline' => [$admin, ["admin1\n", 'admin1@example.com', self::HASH_ARGON]],
             'admin email in uppercase' => [$admin, ['admin1', 'Admin1@Example.com', self::HASH_ARGON]],
             'admin password hash not hashed' => [$admin, ['admin1', 'admin1@example.com', 'secret']],
+            'otp code hmac in uppercase hex' => [
+                "INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) "
+                . "VALUES ('mailbox', 1, 'login', ?, UTC_TIMESTAMP(), '127.0.0.1')",
+                [str_repeat('A', 64)],
+            ],
+            'session token hash in uppercase hex' => [
+                "INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) "
+                . "VALUES (?, 'admin', 1, UTC_TIMESTAMP(), '127.0.0.1', 'test')",
+                [str_repeat('A', 64)],
+            ],
             'otp target in uppercase' => [
                 "INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, target, expires_at, request_ip) "
                 . "VALUES ('mailbox', 1, 'verify_email', REPEAT('a', 64), ?, UTC_TIMESTAMP(), '127.0.0.1')",
                 ['New@Example.com'],
             ],
         ];
+    }
+
+    public function test_hash_columns_accept_lowercase_hex(): void
+    {
+        $hex = hash('sha256', 'secret');
+
+        $this->query(
+            "INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) "
+            . "VALUES ('mailbox', 1, 'login', ?, UTC_TIMESTAMP(), '127.0.0.1')",
+            [$hex]
+        );
+        $this->query(
+            "INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) "
+            . "VALUES (?, 'admin', 1, UTC_TIMESTAMP(), '127.0.0.1', 'test')",
+            [$hex]
+        );
+
+        $this->assertSame($hex, $this->scalar('SELECT code_hmac FROM otp_codes'));
+        $this->assertSame($hex, $this->scalar('SELECT token_hash FROM sessions'));
     }
 
     public function test_seeds(): void

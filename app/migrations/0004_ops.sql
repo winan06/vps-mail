@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS otp_codes (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     KEY ix_otp_codes_subject_purpose (subject_type, subject_id, purpose),
+    CONSTRAINT chk_otp_codes_code_hmac_lc CHECK (code_hmac = LOWER(code_hmac)),
     CONSTRAINT chk_otp_codes_target_lc CHECK (target = LOWER(target))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -75,7 +76,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_agent VARCHAR(255) NOT NULL,
     revoked_at DATETIME NULL,
     PRIMARY KEY (token_hash),
-    KEY ix_sessions_subject (subject_type, subject_id)
+    KEY ix_sessions_subject (subject_type, subject_id),
+    CONSTRAINT chk_sessions_token_hash_lc CHECK (token_hash = LOWER(token_hash))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- domain_id has no foreign key on purpose, so the history survives deleting a domain.

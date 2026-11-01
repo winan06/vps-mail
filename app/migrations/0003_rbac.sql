@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS admins (
     KEY ix_admins_mailbox (mailbox_id),
     CONSTRAINT fk_admins_role FOREIGN KEY (role_id) REFERENCES roles (id) ON DELETE RESTRICT,
     CONSTRAINT fk_admins_mailbox FOREIGN KEY (mailbox_id) REFERENCES mailboxes (id) ON DELETE SET NULL,
-    CONSTRAINT chk_admins_username_format CHECK (username REGEXP '^[a-z0-9._-]{3,64}$'),
+    CONSTRAINT chk_admins_username_format CHECK (username REGEXP '^[a-z0-9._-]{3,64}\\z'),
     CONSTRAINT chk_admins_email_lc CHECK (email = LOWER(email)),
     CONSTRAINT chk_admins_password_hash_prefix CHECK (password_hash LIKE '$argon2id$%' OR password_hash LIKE '$2y$%')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

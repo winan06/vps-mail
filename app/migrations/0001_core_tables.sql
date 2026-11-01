@@ -6,6 +6,8 @@
 --     must be lowercase (CHECK col = LOWER(col)); callers lowercase before lookup.
 --   * Times are UTC DATETIME values; every connection runs SET time_zone = '+00:00'.
 --   * Safe to re-run: CREATE TABLE IF NOT EXISTS, and no row is ever overwritten.
+--   * Format patterns end with \\z, not $: PCRE's $ also matches before a final newline.
+--     The doubled backslash is SQL string escaping; the regex sees \z.
 
 CREATE TABLE IF NOT EXISTS domains (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -19,7 +21,7 @@ CREATE TABLE IF NOT EXISTS domains (
     PRIMARY KEY (id),
     UNIQUE KEY uq_domains_name (name),
     CONSTRAINT chk_domains_name_lc CHECK (name = LOWER(name)),
-    CONSTRAINT chk_domains_name_format CHECK (name REGEXP '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
+    CONSTRAINT chk_domains_name_format CHECK (name REGEXP '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\\z')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS domain_aliases (
@@ -44,7 +46,7 @@ CREATE TABLE IF NOT EXISTS dkim_keys (
     UNIQUE KEY uq_dkim_keys_domain_selector (domain_id, selector),
     CONSTRAINT fk_dkim_keys_domain FOREIGN KEY (domain_id) REFERENCES domains (id) ON DELETE CASCADE,
     CONSTRAINT chk_dkim_keys_selector_lc CHECK (selector = LOWER(selector)),
-    CONSTRAINT chk_dkim_keys_selector_format CHECK (selector REGEXP '^[a-z0-9-]+$')
+    CONSTRAINT chk_dkim_keys_selector_format CHECK (selector REGEXP '^[a-z0-9-]+\\z')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -66,7 +68,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     UNIQUE KEY uq_mailboxes_domain_local_part (domain_id, local_part),
     CONSTRAINT fk_mailboxes_domain FOREIGN KEY (domain_id) REFERENCES domains (id) ON DELETE CASCADE,
     CONSTRAINT chk_mailboxes_local_part_lc CHECK (local_part = LOWER(local_part)),
-    CONSTRAINT chk_mailboxes_local_part_format CHECK (local_part REGEXP '^[a-z0-9._+-]+$'),
+    CONSTRAINT chk_mailboxes_local_part_format CHECK (local_part REGEXP '^[a-z0-9._+-]+\\z'),
     CONSTRAINT chk_mailboxes_password_hash_prefix CHECK (password_hash LIKE '$argon2id$%' OR password_hash LIKE '$2y$%'),
     CONSTRAINT chk_mailboxes_recovery_email_lc CHECK (recovery_email = LOWER(recovery_email))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
