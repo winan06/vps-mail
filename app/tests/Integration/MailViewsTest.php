@@ -18,6 +18,18 @@ final class MailViewsTest extends DbTestCase
 {
     use Fixtures;
 
+    /** The mail views of 0005 and the columns each one exposes, in order. */
+    private const COLUMNS = [
+        'v_domains' => ['name'],
+        'v_local_addresses' => ['domain_id', 'local_part'],
+        'v_mailboxes' => ['email', 'maildir', 'quota_mb'],
+        'v_auth' => ['email', 'password'],
+        'v_aliases' => ['source', 'destination'],
+        'v_sender_login' => ['sender', 'login'],
+        'v_rejected_local' => ['domain_id', 'local_part', 'reason'],
+        'v_rejected_recipients' => ['email', 'reason'],
+    ];
+
     private PDO $pdo;
 
     private int $example;
@@ -120,18 +132,7 @@ final class MailViewsTest extends DbTestCase
 
     public function test_views_expose_exactly_the_documented_columns(): void
     {
-        $expected = [
-            'v_domains' => ['name'],
-            'v_local_addresses' => ['domain_id', 'local_part'],
-            'v_mailboxes' => ['email', 'maildir', 'quota_mb'],
-            'v_auth' => ['email', 'password'],
-            'v_aliases' => ['source', 'destination'],
-            'v_sender_login' => ['sender', 'login'],
-            'v_rejected_local' => ['domain_id', 'local_part', 'reason'],
-            'v_rejected_recipients' => ['email', 'reason'],
-        ];
-
-        foreach ($expected as $view => $columns) {
+        foreach (self::COLUMNS as $view => $columns) {
             $actual = $this->pdo->query(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() "
                 . "AND table_name = '$view' ORDER BY ordinal_position"
@@ -141,15 +142,22 @@ final class MailViewsTest extends DbTestCase
         }
     }
 
+    /**
+     * Only the mail views of 0005. The policy and portal views of 0006 have enum and JSON
+     * columns that keep the table collation; PolicyViewsTest checks their identifier columns.
+     */
     public function test_every_text_column_is_ascii_bin(): void
     {
-        $rows = $this->pdo->query(
+        $views = array_keys(self::COLUMNS);
+        $stmt = $this->pdo->prepare(
             "SELECT CONCAT(table_name, '.', column_name, ' ', collation_name) FROM information_schema.columns "
-            . "WHERE table_schema = DATABASE() AND table_name LIKE 'v\\_%' AND collation_name IS NOT NULL "
-            . "AND collation_name <> 'ascii_bin'"
-        )->fetchAll(PDO::FETCH_COLUMN);
+            . "WHERE table_schema = DATABASE() AND table_name IN ("
+            . implode(', ', array_fill(0, count($views), '?'))
+            . ") AND collation_name IS NOT NULL AND collation_name <> 'ascii_bin'"
+        );
+        $stmt->execute($views);
 
-        $this->assertSame([], $rows);
+        $this->assertSame([], $stmt->fetchAll(PDO::FETCH_COLUMN));
     }
 
     public function test_migration_can_be_run_again(): void

@@ -93,6 +93,19 @@ trait Fixtures
     }
 
     /**
+     * An admin account with the named role (resolved by name) and, optionally, a linked
+     * mailbox. The email is "$username@admins.example", always lowercase.
+     */
+    protected function admin(string $username, string $roleName, ?int $mailboxId, string $status = 'active'): int
+    {
+        return $this->insertRow(
+            'INSERT INTO admins (username, email, password_hash, role_id, mailbox_id, status) '
+            . 'VALUES (?, ?, ?, (SELECT id FROM roles WHERE name = ?), ?, ?)',
+            [$username, strtolower($username) . '@admins.example', self::ARGON, $roleName, $mailboxId, $status]
+        );
+    }
+
+    /**
      * First column of every result row, sorted as strings.
      *
      * @param list<mixed> $params
