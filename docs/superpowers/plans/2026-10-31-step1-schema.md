@@ -31,7 +31,7 @@
 
 ## Review Focus
 
-1. **Catch-all alias next to real mailboxes:** mail to `alice@` must still reach Alice, not the catch-all. Pinned in Task 4: `test_catch_all_does_not_swallow_mailboxes`.
+1. **Mail for a suspended or empty address must never reach another user.** Catch-all aliases are not supported (Ruling 13), and `v_rejected_recipients` rejects non-active addresses at RCPT. Pinned in Task 4: `test_alias_to_suspended_mailbox_does_not_reach_another_user`, `test_v_rejected_recipients`.
 2. **Suspended mailbox with a forwarding rule:** forwarding must stop. Pinned in Task 4: `test_suspended_mailbox_has_no_alias_rows`.
 3. **Universal-list member whose own domain is suspended:** they must stop receiving list mail. Pinned in Task 4: `test_list_expansion_only_active_members`.
 4. **Mixed-case address stored** (e.g. `Bob@Example.com`): lowercase lookups from Postfix would silently miss it, so inserts are rejected. Pinned in Task 3: `test_identifiers_must_be_lowercase`.
@@ -153,7 +153,7 @@ test_cli_bad_env_exits_1: env chmod 0644 → exit 1, stderr /world-readable/
 | 0001 | `domain_aliases` | id; `alias_domain` VARCHAR(253) lc UNIQUE; `target_domain_id` FK→domains (C) |
 | 0001 | `dkim_keys` | id; `domain_id` FK→domains (C); `selector` VARCHAR(63) lc `REGEXP '^[a-z0-9-]+$'`; `public_key` TEXT; `active` BOOL DEFAULT 0; `created_at`; UNIQUE(domain_id, selector) |
 | 0001 | `mailboxes` | id; `domain_id` FK→domains (C); `local_part` VARCHAR(64) lc `REGEXP '^[a-z0-9._+-]+$'`; UNIQUE(domain_id, local_part); `password_hash` VARCHAR(255) ascii_bin, CHECK `LIKE '$argon2id$%' OR LIKE '$2y$%'`; `recovery_email` VARCHAR(254) lc NULL; `recovery_verified_at` NULL; `status` ENUM(active,suspended,deleting) DEFAULT active; `quota_mb` INT UNSIGNED DEFAULT 1024; `quota_used_bytes` BIGINT UNSIGNED NULL; `usage_updated_at` NULL; `external_forwarding` ENUM(inherit,deny) DEFAULT inherit; `password_changed_at` DEFAULT CURRENT_TIMESTAMP; `suspended_at` NULL; `created_at` |
-| 0001 | `aliases` | id; `domain_id` FK→domains (C); `local_part` VARCHAR(64) lc DEFAULT '' ('' means catch-all); `active` BOOL DEFAULT 1; UNIQUE(domain_id, local_part) |
+| 0001 | `aliases` | id; `domain_id` FK→domains (C); `local_part` VARCHAR(64) lc NOT NULL, CHECK <> '' (no catch-all aliases — Ruling 13); `active` BOOL DEFAULT 1; UNIQUE(domain_id, local_part) |
 | 0001 | `alias_targets` | id; `alias_id` FK→aliases (C); `destination` VARCHAR(254) lc, CHECK `LIKE '_%@_%'`; UNIQUE(alias_id, destination) |
 | 0001 | `forwarding_rules` | id; `mailbox_id` FK→mailboxes (C); `destination` as in alias_targets; `keep_copy` BOOL DEFAULT 1; `active` BOOL DEFAULT 1; `created_by_type` ENUM(admin,mailbox); `created_by_id` INT UNSIGNED; `created_at`; UNIQUE(mailbox_id, destination) |
 | 0002 | `lists` | id; `domain_id` FK→domains (C); `local_part` VARCHAR(64) lc, CHECK <> ''; `scope` ENUM(domain,universal); `self_subscribe` BOOL DEFAULT 0; `max_message_kb` INT UNSIGNED NULL (NULL means the global limit); `status` ENUM(active,suspended) DEFAULT active; `created_at`; UNIQUE(domain_id, local_part) |
@@ -218,16 +218,16 @@ test_migrations_rerunnable: DELETE FROM schema_migrations; migrateAll() → no e
 - Consumes: the Task 3 tables.
 - Produces the following views. "Active" means the row's status is `active`, its domain's status is `active`, and for aliases and rules `active = 1`.
   - `v_domains(name)`: active domains, plus `alias_domain` values whose target domain is active.
-  - `v_local_addresses(domain_id, local_part)`: internal helper, never granted. Union of active mailboxes, active non-catch-all aliases and active lists.
+  - `v_local_addresses(domain_id, local_part)`: internal helper, never granted. Union of active mailboxes, active aliases and active lists.
   - `v_mailboxes(email, maildir, quota_mb)`: active mailboxes; `maildir = CONCAT(domain, '/', local_part, '/')`.
   - `v_auth(email, password)`: active mailboxes. `password` is `CONCAT('{ARGON2ID}', hash)` when the hash starts with `$argon2id$`, otherwise `CONCAT('{BLF-CRYPT}', hash)`.
   - `v_aliases(source, destination)`: UNION ALL of
-    - (a) alias targets, with source `CONCAT(local_part, '@', domain)` (catch-all gives `@domain`);
+    - (a) alias targets, with source `CONCAT(local_part, '@', domain)`;
     - (b) each active forwarding rule of an active mailbox → its destination;
     - (c) **identity row** mailbox → itself, when the mailbox is active AND (it has no active rules OR any active rule has `keep_copy = 1`);
     - (d) list → member, for an active list, an active member row, and a member mailbox that is active (which means the member's own domain is active too);
     - (e) for each alias domain with an active target: `lp@alias_domain → lp@target` for every `v_local_addresses` row in the target domain.
-  - `v_sender_login(sender, login)`: each active mailbox → itself; each active non-catch-all alias address → each target that is an active local mailbox.
+  - `v_sender_login(sender, login)`: each active mailbox → itself; each active alias address → each target that is an active local mailbox.
   - `v_rejected_recipients(email, reason)` (Ruling 11, added in fix round): in active domains, (1) non-active mailboxes, (2) lists that are not active or have no deliverable member, (3) non-catch-all aliases that are inactive or have no targets; plus (4) their `lp@alias_domain` variants for alias domains with an active target. Step 2 wires it as Postfix `check_recipient_access`, so these addresses are rejected instead of falling through to a catch-all.
   - Fixture helpers in the `Fixtures` trait:
     - `domain(string $name, string $status = 'active'): int`
@@ -250,7 +250,7 @@ test_migrations_rerunnable: DELETE FROM schema_migrations; migrateAll() → no e
     - carol@example.com: active, `$2y$`, forward to carol@gmail.com with keep_copy=0;
     - dave@example.com: active, forward to dave@gmail.com with keep_copy=1;
     - erin@other.org: active (but her domain is suspended).
-  - Aliases: `sales@example.com → alice@example.com, dave@example.com`; catch-all `@example.com → alice@example.com`.
+  - Aliases: `sales@example.com → alice@example.com, dave@example.com`.
   - Lists:
     - universal `team@example.com` with members alice (active), bob (active row, but his mailbox is suspended), dave (member row suspended) and erin (active row, but her domain is suspended);
     - `old@example.com` with status suspended and member alice.
@@ -260,8 +260,7 @@ test_v_domains: col(name) === ['example.com','example.net']
 test_v_mailboxes: emails === [alice, carol, dave]@example.com; alice maildir === 'example.com/alice/'
 test_v_auth_prefixes: alice starts '{ARGON2ID}$argon2id$'; carol starts '{BLF-CRYPT}$2y$'; bob absent
 test_alias_targets: destinations of 'sales@example.com' === ['alice@example.com','dave@example.com']
-test_catch_all_does_not_swallow_mailboxes: destinations of 'alice@example.com' === ['alice@example.com'];
-    of '@example.com' === ['alice@example.com']
+test_mailbox_without_forwarding_maps_to_itself: destinations of 'alice@example.com' === ['alice@example.com']
 test_forwarding_without_copy: of 'carol@example.com' === ['carol@gmail.com']
 test_forwarding_with_copy: of 'dave@example.com' === ['dave@example.com','dave@gmail.com']
 test_suspended_mailbox_has_no_alias_rows: no row with source 'bob@example.com'

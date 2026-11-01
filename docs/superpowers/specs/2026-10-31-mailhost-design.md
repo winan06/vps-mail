@@ -97,7 +97,7 @@ MariaDB, InnoDB, utf8mb4. Times are stored in UTC. Changes are applied by versio
 | `domain_aliases` | `alias_domain` (unique), `target_domain_id` |
 | `dkim_keys` | `domain_id`, `selector`, `public_key`, `active`, `created_at`. Private keys are kept only on disk, in `/var/lib/rspamd/dkim/`. |
 | `mailboxes` | `id`, `domain_id`, `local_part`, unique (`domain_id`, `local_part`), `password_hash` (Argon2id), `recovery_email`, `recovery_verified_at`, `status` (active/suspended/deleting), `quota_mb`, `quota_used_bytes`, `usage_updated_at`, `external_forwarding` (inherit/deny), `password_changed_at`, `suspended_at`, `created_at` |
-| `aliases` | `id`, `domain_id`, `local_part` (a blank local part means catch-all), `active` |
+| `aliases` | `id`, `domain_id`, `local_part` (never blank: catch-all aliases are not supported, so mail for a suspended or unknown address can never reach another user), `active` |
 | `alias_targets` | `alias_id`, `destination` |
 | `forwarding_rules` | `id`, `mailbox_id`, `destination`, `keep_copy`, `active`, `created_by` |
 | `lists` | `id`, `local_part`, `domain_id` (the domain the address lives in), `scope` (domain/universal), `self_subscribe`, `max_message_kb`, `status` |
@@ -129,12 +129,13 @@ The views include active rows only. Because Postfix and Dovecot read them on eve
   - list expansions, one row per active member. Postfix MySQL maps join multiple rows with commas, so no GROUP_CONCAT is needed;
   - alias domains, one row per active mailbox of the target domain (`user@alias` → `user@target`), so unknown addresses at an alias domain are still rejected.
 - `v_sender_login`: sending address → login names allowed to use it (the mailbox itself and its aliases).
+- `v_rejected_recipients`: addresses that exist but must not receive mail (suspended or deleting mailboxes, suspended or empty lists, disabled or target-less aliases, and their alias-domain variants). Postfix uses it as `check_recipient_access`, so these are rejected at RCPT time with a clear reason.
 
 ### 5.3 Database users (least privilege)
 
 | User | Used by | Grants |
 |---|---|---|
-| `mail_ro` | Postfix, Dovecot | SELECT on `v_*` only |
+| `mail_ro` | Postfix, Dovecot | SELECT on the six mail views only (`v_domains`, `v_mailboxes`, `v_auth`, `v_aliases`, `v_sender_login`, `v_rejected_recipients`) |
 | `mail_policy` | `mailpolicy` | SELECT on `v_*` and the list tables; INSERT on `audit_log` |
 | `mail_app` | Admin site | Read/write on app tables; INSERT only on `audit_log` |
 | `mail_portal` | Portal | SELECT on `mailboxes`, `domains`, `lists`, `list_members` and `list_owners`. UPDATE only on these mailbox columns: `password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`. Read/write on `forwarding_rules`, `list_members`, `otp_codes` and `sessions`. INSERT on `deployments` (portal-safe job types only: `doveadm_kick`). INSERT only on `audit_log`. |
