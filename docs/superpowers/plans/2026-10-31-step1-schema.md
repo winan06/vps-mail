@@ -343,10 +343,10 @@ test_portal_view_rejects_other_jobs: job_type 'dkim_generate' → errorInfo[1] =
 | User | Grants |
 |---|---|
 | `mail_ro` | SELECT on `v_domains`, `v_mailboxes`, `v_auth`, `v_aliases`, `v_sender_login`, `v_rejected_recipients` |
-| `mail_policy` | SELECT on `v_domains`, `v_lists`, `v_list_sender_rules`, `v_login_roles`, `settings`; INSERT on `audit_log` |
-| `mail_app` | SELECT, INSERT, UPDATE, DELETE on every `TABLES` entry except `audit_log`; SELECT, INSERT on `audit_log` |
-| `mail_portal` | SELECT on `domains`, `mailboxes`, `lists`, `list_owners`, `settings`; UPDATE (`password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`) on `mailboxes`; SELECT, INSERT, UPDATE, DELETE on `forwarding_rules`, `list_members`, `otp_codes`, `sessions`; INSERT on `v_portal_deployments`, `audit_log` |
-| `mailctl` | SELECT on `` `db`.* ``; UPDATE on `deployments`; SELECT, INSERT, UPDATE on `quarantine_items`; UPDATE (`quota_used_bytes`, `usage_updated_at`) on `mailboxes`; INSERT, UPDATE on `dkim_keys`; DELETE on `mailboxes`, `domains`; INSERT on `audit_log` |
+| `mail_policy` | SELECT on `v_domains`, `v_lists`, `v_list_sender_rules`, `v_login_roles`, `settings`; INSERT (`actor_type`, `actor_id`, `action`, `target_type`, `target_id`, `domain_id`, `ip`, `details`) on `audit_log` |
+| `mail_app` | SELECT, INSERT, UPDATE, DELETE on every `TABLES` entry except `audit_log`; SELECT on `audit_log`; INSERT (`actor_type`, `actor_id`, `action`, `target_type`, `target_id`, `domain_id`, `ip`, `details`) on `audit_log` |
+| `mail_portal` | SELECT on `domains`, `mailboxes`, `lists`, `list_owners`, `settings`; UPDATE (`password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`) on `mailboxes`; SELECT, INSERT, UPDATE, DELETE on `forwarding_rules`, `list_members`, `otp_codes`, `sessions`; INSERT (`job_type`, `payload`, `requested_by_type`, `requested_by_id`) on `v_portal_deployments` only (no SELECT/UPDATE/DELETE on it); INSERT (`actor_type`, `actor_id`, `action`, `target_type`, `target_id`, `domain_id`, `ip`, `details`) on `audit_log` |
+| `mailctl` | SELECT on `` `db`.* ``; UPDATE on `deployments`; SELECT, INSERT, UPDATE on `quarantine_items`; UPDATE (`quota_used_bytes`, `usage_updated_at`) on `mailboxes`; INSERT, UPDATE on `dkim_keys`; DELETE on `mailboxes`, `domains`; INSERT (`actor_type`, `actor_id`, `action`, `target_type`, `target_id`, `domain_id`, `ip`, `details`) on `audit_log` |
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -373,6 +373,9 @@ test_tables_constant_matches_schema: Grants::TABLES sorted === information_schem
     mailctl:     UPDATE deployments SET status=status ✓ | UPDATE mailboxes SET quota_used_bytes=0 ✓
                  | UPDATE mailboxes SET password_hash=password_hash ✗ | DELETE FROM domains WHERE name='gone.test' ✓
                  | INSERT INTO admins … ✗
+test_column_level_inserts (Ruling 15/16): mail_portal INSERT INTO v_portal_deployments naming `id` → 1143;
+    mail_portal SELECT/UPDATE/DELETE on v_portal_deployments → 1142; for every user with audit_log INSERT,
+    INSERT naming `id` or `at` → 1143 while INSERT of the 8 allowed columns works
 test_reprovision_rotates_password: provision('mail_ro', p1); provision('mail_ro', p2) →
     asUser(p1) throws errorInfo[1] === 1045; asUser(p2) works; SHOW GRANTS line count unchanged
 test_reprovision_removes_stray_grants: root runs GRANT SELECT ON mailhost_test.mailboxes TO mail_ro@'127.0.0.1';
