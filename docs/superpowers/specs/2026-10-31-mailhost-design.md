@@ -44,6 +44,8 @@ Run a self-hosted mail service for several domains on one new Ubuntu VPS. Admins
 | List members | Hosted mailboxes only. No external addresses and no nested lists. |
 | External forwarding | Rewritten with `postsrsd` (SRS) so SPF still passes at the destination. |
 | Backups | Deferred. Not in version 1. |
+| Addresses | Lowercase ASCII only. Local parts: letters, digits, `_ + -`, single dots between them. Domains: two or more labels. No catch-all aliases. No plus-addressing (`recipient_delimiter` unset) in version 1. |
+| Lists as targets | Aliases and forwards may not point at a list; such rows are ignored, so list sender rules can't be bypassed. |
 
 ## 3. Hostnames and network
 
@@ -108,7 +110,7 @@ MariaDB, InnoDB, utf8mb4. Times are stored in UTC. Changes are applied by versio
 | `roles` | `id`, `name` (super_admin, domain_admin) |
 | `role_permissions` | `role_id`, `permission`. Permissions match SRS §4.4, e.g. `mailbox.manage`, `list.universal.manage`, `audit.read`. |
 | `admin_domains` | `admin_id`, `domain_id`, `may_manage_universal_members` |
-| `filter_policies` | `domain_id` (NULL means the global row), `tag_score`, `quarantine_score`, `reject_score`, `virus_action` (reject/quarantine), `unscannable_action` (quarantine/tag/reject). The global row also stores the min and max limits that domain rows must stay within. |
+| `filter_global` + `filter_policies` | `filter_global` is a single row with the global `tag_score`, `quarantine_score`, `reject_score`, `virus_action`, `unscannable_action` and the min/max bounds domains must stay within. `filter_policies` holds one row per domain with the same score and action columns. |
 | `quarantine_items` | `queue_id`, `domain_id`, `envelope_from`, `envelope_to`, `score`, `reason` (symbol names), `size_bytes`, `held_at`, `status` (held/released/deleted) |
 | `otp_codes` | `id`, `subject_type` (mailbox/admin), `subject_id`, `purpose` (login/recovery/verify_email), `code_hmac`, `target` (the new email for verify_email), `expires_at`, `attempts`, `used_at`, `request_ip` |
 | `sessions` | `token_hash`, `subject_type`, `subject_id`, `created_at`, `last_seen_at`, `expires_at`, `ip`, `user_agent`, `revoked_at` |
@@ -136,10 +138,10 @@ The views include active rows only. Because Postfix and Dovecot read them on eve
 | User | Used by | Grants |
 |---|---|---|
 | `mail_ro` | Postfix, Dovecot | SELECT on the six mail views only (`v_domains`, `v_mailboxes`, `v_auth`, `v_aliases`, `v_sender_login`, `v_rejected_recipients`) |
-| `mail_policy` | `mailpolicy` | SELECT on `v_*` and the list tables; INSERT on `audit_log` |
-| `mail_app` | Admin site | Read/write on app tables; INSERT only on `audit_log` |
-| `mail_portal` | Portal | SELECT on `mailboxes`, `domains`, `lists`, `list_members` and `list_owners`. UPDATE only on these mailbox columns: `password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`. Read/write on `forwarding_rules`, `list_members`, `otp_codes` and `sessions`. INSERT on `deployments` (portal-safe job types only: `doveadm_kick`). INSERT only on `audit_log`. |
-| `mailctl` | `mailctl-deploy`, `mailhost-status` | Read on everything. UPDATE on `deployments`, `quarantine_items`, the mailbox usage columns and `dkim_keys`. INSERT on `audit_log`. |
+| `mail_policy` | `mailpolicy` | SELECT on `v_domains`, `v_lists`, `v_list_sender_rules`, `v_login_roles` and `settings`; column-level INSERT on `audit_log` (never `id` or `at`) |
+| `mail_app` | Admin site | Read/write on app tables except `audit_log`; SELECT and column-level INSERT on `audit_log` (never `id` or `at`) |
+| `mail_portal` | Portal | SELECT on `domains`, `mailboxes`, `lists`, `list_owners`, `settings`. UPDATE only on these mailbox columns: `password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`. Read/write on `forwarding_rules` and `list_members`. Sessions and OTP codes only through `v_portal_sessions` / `v_portal_otp_codes` (mailbox rows only, enforced by `WITH CHECK OPTION`). Jobs only through `v_portal_deployments` (`doveadm_kick`, requested by a mailbox). column-level INSERT on `audit_log` (never `id` or `at`). |
+| `mailctl` | `mailctl-deploy`, `mailhost-status` | Read on everything. UPDATE on `deployments`, `quarantine_items`, the mailbox usage columns and `dkim_keys`. column-level INSERT on `audit_log` (never `id` or `at`). |
 
 ## 6. Mail flow
 
@@ -176,7 +178,7 @@ The views include active rows only. Because Postfix and Dovecot read them on eve
 - **Storage:** forwarding rows are part of `v_aliases`. `keep_copy` decides whether the mailbox also keeps a copy (FR-040).
 - **External destinations** go through `postsrsd`.
 - **Loops (FR-041):** on save, the app follows the forwarding graph across hosted addresses and rejects any cycle. Postfix's `Delivered-To` loop detection catches loops through outside servers.
-- **Restrictions (FR-042):** checked on save against global, domain and mailbox settings. The effective setting is the strictest of the three.
+- **Restrictions (FR-042):** checked on save against global, domain and mailbox settings, and also enforced by `v_aliases` itself: an external forward only appears while all three levels allow it, so tightening any level stops existing forwards immediately.
 
 ### 6.4 Quarantine
 
