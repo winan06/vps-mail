@@ -18,7 +18,8 @@ use PDOStatement;
  * Every test provisions the accounts with fresh random passwords and then connects as
  * them over TCP, so the grants are exercised exactly as the services will use them.
  * A refused statement fails with MariaDB error 1142 (table access denied) or 1143
- * (column access denied), asserted on errorInfo[1], never on the message.
+ * (column access denied), or 1369 when a view's CHECK OPTION refuses the row, asserted on
+ * errorInfo[1], never on the message.
  */
 final class GrantsMatrixTest extends DbTestCase
 {
@@ -27,6 +28,7 @@ final class GrantsMatrixTest extends DbTestCase
     private const TABLE_DENIED = 1142;
     private const COLUMN_DENIED = 1143;
     private const ACCESS_DENIED = 1045;
+    private const CHECK_OPTION_FAILED = 1369;
 
     private const HOSTS = ['localhost', '127.0.0.1'];
     private const CLI_DATABASE = 'mailhost_cli_test';
@@ -75,6 +77,24 @@ final class GrantsMatrixTest extends DbTestCase
             $pdo->query($sql);
         } catch (PDOException $e) {
             $this->assertContains($e->errorInfo[1] ?? null, $codes, $e->getMessage() . ' for: ' . $sql);
+
+            return;
+        }
+
+        $this->fail('Statement was not refused: ' . $sql);
+    }
+
+    /**
+     * Like assertDenied(), for a prepared statement with parameters.
+     *
+     * @param list<mixed> $params
+     */
+    private function assertDeniedWith(PDO $pdo, int $code, string $sql, array $params): void
+    {
+        try {
+            $pdo->prepare($sql)->execute($params);
+        } catch (PDOException $e) {
+            $this->assertSame($code, $e->errorInfo[1] ?? null, $e->getMessage() . ' for: ' . $sql);
 
             return;
         }
@@ -153,7 +173,10 @@ final class GrantsMatrixTest extends DbTestCase
 
         $add('mail_portal', 'SELECT * FROM mailboxes', true);
         $add('mail_portal', 'UPDATE mailboxes SET password_hash=password_hash', true);
-        $add('mail_portal', 'DELETE FROM sessions', true);
+        $add('mail_portal', 'SELECT * FROM v_portal_sessions', true);
+        $add('mail_portal', 'DELETE FROM v_portal_sessions', true);
+        $add('mail_portal', 'SELECT * FROM v_portal_otp_codes', true);
+        $add('mail_portal', 'DELETE FROM v_portal_otp_codes', true);
         $add('mail_portal', self::KICK, true);
         $add('mail_portal', self::AUDIT_INSERT, true);
         $add('mail_portal', 'UPDATE mailboxes SET quota_mb=1', false);
@@ -167,6 +190,10 @@ final class GrantsMatrixTest extends DbTestCase
             false
         );
         $add('mail_portal', 'SELECT * FROM v_local_addresses', false);
+        $add('mail_portal', 'SELECT * FROM sessions', false);
+        $add('mail_portal', 'DELETE FROM sessions', false);
+        $add('mail_portal', 'SELECT * FROM otp_codes', false);
+        $add('mail_portal', 'DELETE FROM otp_codes', false);
 
         $add('mailctl', 'UPDATE deployments SET status=status', true);
         $add('mailctl', 'UPDATE mailboxes SET quota_used_bytes=0', true);
@@ -222,6 +249,128 @@ final class GrantsMatrixTest extends DbTestCase
         }
 
         $this->assertSame(4, (int) $this->pdo()->query("SELECT COUNT(*) FROM audit_log WHERE action = 'grants.test'")->fetchColumn());
+    }
+
+    /**
+     * The portal reaches sessions only through v_portal_sessions, which holds mailbox sessions
+     * only: it can run the whole mailbox session life cycle, but cannot touch the table, see
+     * or create an admin session, or rewrite who a session belongs to.
+     */
+    public function test_portal_sessions_only_through_the_mailbox_view(): void
+    {
+        $admin = hash('sha256', 'admin-token');
+        $this->pdo()->prepare(
+            'INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+            . "VALUES (?, 'admin', 1, '2030-01-01 00:00:00', '127.0.0.1', 'admin app')"
+        )->execute([$admin]);
+
+        $portal = $this->connectAs('mail_portal');
+        $mine = hash('sha256', 'mailbox-token');
+        $other = hash('sha256', 'other-token');
+
+        foreach ([
+            'SELECT * FROM sessions',
+            "UPDATE sessions SET revoked_at = '2029-01-01 00:00:00'",
+            'DELETE FROM sessions',
+            'INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+                . "VALUES ('$other', 'mailbox', 1, '2030-01-01 00:00:00', '203.0.113.5', 'x')",
+        ] as $sql) {
+            $this->assertDenied($portal, $sql, [self::TABLE_DENIED]);
+        }
+
+        $insert = 'INSERT INTO v_portal_sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+            . "VALUES (?, ?, 1, '2030-01-01 00:00:00', '203.0.113.5', 'browser')";
+        $this->assertDeniedWith($portal, self::CHECK_OPTION_FAILED, $insert, [$other, 'admin']);
+
+        // The mailbox life cycle: create, read, touch and extend, revoke, delete.
+        $portal->prepare($insert)->execute([$mine, 'mailbox']);
+        $this->assertSame([$mine], $portal->query('SELECT token_hash FROM v_portal_sessions')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame(1, $portal->exec(
+            "UPDATE v_portal_sessions SET last_seen_at = '2029-06-01 00:00:00', expires_at = '2031-01-01 00:00:00', "
+            . "revoked_at = '2029-06-02 00:00:00' WHERE token_hash = '$mine'"
+        ));
+
+        foreach ([
+            'token_hash' => "'$other'",
+            'subject_type' => "'admin'",
+            'subject_id' => '2',
+            'created_at' => "'2000-01-01 00:00:00'",
+            'ip' => "'198.51.100.1'",
+            'user_agent' => "'x'",
+        ] as $column => $value) {
+            $this->assertDenied($portal, "UPDATE v_portal_sessions SET $column = $value WHERE token_hash = '$mine'", [self::COLUMN_DENIED]);
+        }
+
+        $this->assertSame(1, $portal->exec('DELETE FROM v_portal_sessions'));
+
+        $this->assertSame(
+            ["$admin admin not-revoked"],
+            $this->col("SELECT CONCAT(token_hash, ' ', subject_type, ' ', IF(revoked_at IS NULL, 'not-revoked', 'revoked')) FROM sessions")
+        );
+    }
+
+    /**
+     * The portal reaches one-time codes only through v_portal_otp_codes, which holds mailbox
+     * codes only. It may count attempts and mark a code used, never re-target, re-key or
+     * extend one, and it never chooses the row id.
+     */
+    public function test_portal_codes_only_through_the_mailbox_view(): void
+    {
+        $this->pdo()->exec(
+            'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
+            . "VALUES ('admin', 1, 'login', REPEAT('b', 64), '2030-01-01 00:00:00', '127.0.0.1')"
+        );
+
+        $portal = $this->connectAs('mail_portal');
+
+        foreach ([
+            'SELECT * FROM otp_codes',
+            'UPDATE otp_codes SET attempts = 0',
+            'DELETE FROM otp_codes',
+            'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
+                . "VALUES ('mailbox', 1, 'login', REPEAT('c', 64), '2030-01-01 00:00:00', '203.0.113.5')",
+        ] as $sql) {
+            $this->assertDenied($portal, $sql, [self::TABLE_DENIED]);
+        }
+
+        $insert = 'INSERT INTO v_portal_otp_codes (subject_type, subject_id, purpose, code_hmac, target, expires_at, request_ip) '
+            . "VALUES (?, 1, 'verify_email', REPEAT('a', 64), 'new@example.org', '2030-01-01 00:00:00', '203.0.113.5')";
+        $this->assertDeniedWith($portal, self::CHECK_OPTION_FAILED, $insert, ['admin']);
+        $this->assertDenied(
+            $portal,
+            'INSERT INTO v_portal_otp_codes (id, subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
+            . "VALUES (18446744073709551615, 'mailbox', 1, 'login', REPEAT('a', 64), '2030-01-01 00:00:00', '203.0.113.5')",
+            [self::COLUMN_DENIED]
+        );
+
+        // The mailbox life cycle: create, read, count an attempt, mark used, delete.
+        $portal->prepare($insert)->execute(['mailbox']);
+        $id = (int) $portal->lastInsertId();
+        $this->assertGreaterThan(0, $id);
+        $this->assertSame(
+            ["$id mailbox new@example.org"],
+            $portal->query("SELECT CONCAT(id, ' ', subject_type, ' ', target) FROM v_portal_otp_codes")->fetchAll(PDO::FETCH_COLUMN)
+        );
+        $this->assertSame(1, $portal->exec("UPDATE v_portal_otp_codes SET attempts = attempts + 1, used_at = '2029-06-01 00:00:00' WHERE id = $id"));
+
+        foreach ([
+            'subject_type' => "'admin'",
+            'subject_id' => '2',
+            'code_hmac' => "REPEAT('d', 64)",
+            'purpose' => "'recovery'",
+            'target' => "'attacker@example.org'",
+            'expires_at' => "'2031-01-01 00:00:00'",
+            'id' => '1',
+        ] as $column => $value) {
+            $this->assertDenied($portal, "UPDATE v_portal_otp_codes SET $column = $value WHERE id = $id", [self::COLUMN_DENIED]);
+        }
+
+        $this->assertSame(1, $portal->exec('DELETE FROM v_portal_otp_codes'));
+
+        $this->assertSame(
+            ['admin 0'],
+            $this->col("SELECT CONCAT(subject_type, ' ', attempts) FROM otp_codes")
+        );
     }
 
     public function test_mailctl_database_grant_does_not_reach_sibling_databases(): void

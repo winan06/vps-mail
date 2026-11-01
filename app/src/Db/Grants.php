@@ -14,7 +14,8 @@ use InvalidArgumentException;
  *  - mail_ro: Postfix and Dovecot lookups, through six read-only views;
  *  - mail_policy: the list-sender policy service, through views, plus settings and audit_log inserts;
  *  - mail_app: the admin application, full access to the base tables except the audit log;
- *  - mail_portal: the public self-service portal, a few columns and tables, and nothing else;
+ *  - mail_portal: the public self-service portal, a few columns and tables, and its sessions,
+ *    one-time codes and job requests only through the mailbox-only portal views of 0006;
  *  - mailctl: the root-run job runner, which reads everything and writes only what its jobs change.
  *
  * Nothing here grants a global privilege, GRANT OPTION or write access to audit_log rows
@@ -137,9 +138,33 @@ final class Grants
                 $db,
                 'mailboxes'
             ),
-            ...self::onEach(self::ALL_ROW_PRIVILEGES, $db, ['forwarding_rules', 'list_members', 'otp_codes', 'sessions']),
+            ...self::onEach(self::ALL_ROW_PRIVILEGES, $db, ['forwarding_rules', 'list_members']),
+            // Sessions and one-time codes only through views that hold mailbox rows: the portal can
+            // never read, create or redeem an admin session or code. Who a row belongs to and its
+            // secret are fixed once written; only the columns a login or code check updates change.
+            self::grant('SELECT, INSERT, DELETE', $db, 'v_portal_sessions'),
+            self::grant(self::columns('UPDATE', ['last_seen_at', 'expires_at', 'revoked_at']), $db, 'v_portal_sessions'),
+            self::grant('SELECT, DELETE', $db, 'v_portal_otp_codes'),
+            // Every column but id: an id near the AUTO_INCREMENT ceiling would wedge the table.
+            self::grant(
+                self::columns('INSERT', [
+                    'subject_type',
+                    'subject_id',
+                    'purpose',
+                    'code_hmac',
+                    'target',
+                    'expires_at',
+                    'attempts',
+                    'used_at',
+                    'request_ip',
+                    'created_at',
+                ]),
+                $db,
+                'v_portal_otp_codes'
+            ),
+            self::grant(self::columns('UPDATE', ['attempts', 'used_at']), $db, 'v_portal_otp_codes'),
             // Queue-only: the portal can add a job but never read, change or delete one. The view's
-            // CHECK OPTION limits the job to doveadm_kick requested by a mailbox.
+            // CHECK OPTION limits the job to doveadm_kick requested by a named mailbox.
             self::grant(
                 self::columns('INSERT', ['job_type', 'payload', 'requested_by_type', 'requested_by_id']),
                 $db,

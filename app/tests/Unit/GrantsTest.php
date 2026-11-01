@@ -122,12 +122,25 @@ final class GrantsTest extends TestCase
                 . ' ON `mailhost`.`mailboxes`',
             'GRANT SELECT, INSERT, UPDATE, DELETE ON `mailhost`.`forwarding_rules`',
             'GRANT SELECT, INSERT, UPDATE, DELETE ON `mailhost`.`list_members`',
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON `mailhost`.`otp_codes`',
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON `mailhost`.`sessions`',
+            'GRANT SELECT, INSERT, DELETE ON `mailhost`.`v_portal_sessions`',
+            'GRANT UPDATE (`last_seen_at`, `expires_at`, `revoked_at`) ON `mailhost`.`v_portal_sessions`',
+            'GRANT SELECT, DELETE ON `mailhost`.`v_portal_otp_codes`',
+            'GRANT INSERT (`subject_type`, `subject_id`, `purpose`, `code_hmac`, `target`, `expires_at`, `attempts`,'
+                . ' `used_at`, `request_ip`, `created_at`) ON `mailhost`.`v_portal_otp_codes`',
+            'GRANT UPDATE (`attempts`, `used_at`) ON `mailhost`.`v_portal_otp_codes`',
             'GRANT INSERT (`job_type`, `payload`, `requested_by_type`, `requested_by_id`)'
                 . ' ON `mailhost`.`v_portal_deployments`',
             'GRANT INSERT (' . self::AUDIT_COLUMNS . ') ON `mailhost`.`audit_log`',
         ], Grants::forUser('mail_portal', 'mailhost'));
+    }
+
+    /** The portal reaches sessions and one-time codes only through its mailbox-only views. */
+    public function test_mail_portal_never_names_the_session_and_code_tables(): void
+    {
+        foreach (Grants::forUser('mail_portal', 'mailhost') as $statement) {
+            $this->assertStringNotContainsString('`sessions`', $statement);
+            $this->assertStringNotContainsString('`otp_codes`', $statement);
+        }
     }
 
     public function test_mailctl(): void

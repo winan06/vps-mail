@@ -9,12 +9,14 @@ use PDO;
 use PDOException;
 
 /**
- * The views behind the list-sender policy service and the portal job queue (migration 0006).
+ * The views behind the list-sender policy service and the portal (migration 0006).
  *
- * v_lists, v_list_sender_rules and v_login_roles are read by mail_policy; v_portal_deployments
+ * v_lists, v_list_sender_rules and v_login_roles are read by mail_policy. v_portal_deployments
  * is the only way mail_portal may queue a job, so its WITH CASCADED CHECK OPTION must refuse
- * every job that is not a doveadm_kick requested by a mailbox. A refused row fails with
- * MariaDB error 1369 (CHECK OPTION failed), asserted on errorInfo[1], never on the message.
+ * every job that is not a doveadm_kick requested by a known mailbox. v_portal_sessions and
+ * v_portal_otp_codes are the portal's only way to sessions and otp_codes, and must refuse
+ * every admin row. A refused row fails with MariaDB error 1369 (CHECK OPTION failed),
+ * asserted on errorInfo[1], never on the message.
  */
 final class PolicyViewsTest extends DbTestCase
 {
@@ -25,6 +27,27 @@ final class PolicyViewsTest extends DbTestCase
 
     private const KICK = 'INSERT INTO v_portal_deployments (job_type, payload, requested_by_type, requested_by_id) '
         . 'VALUES (?, ?, ?, ?)';
+
+    /** token_hash, subject_type, subject_id */
+    private const PORTAL_SESSION = 'INSERT INTO v_portal_sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+        . "VALUES (?, ?, ?, '2030-01-01 00:00:00', '203.0.113.5', 'test')";
+
+    /** subject_type, subject_id, code_hmac */
+    private const PORTAL_OTP = 'INSERT INTO v_portal_otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
+        . "VALUES (?, ?, 'login', ?, '2030-01-01 00:00:00', '203.0.113.5')";
+
+    /** The portal views and their columns, in order. */
+    private const PORTAL_VIEW_COLUMNS = [
+        'v_portal_deployments' => ['id', 'job_type', 'payload', 'requested_by_type', 'requested_by_id'],
+        'v_portal_sessions' => [
+            'token_hash', 'subject_type', 'subject_id', 'created_at', 'last_seen_at', 'expires_at', 'ip', 'user_agent',
+            'revoked_at',
+        ],
+        'v_portal_otp_codes' => [
+            'id', 'subject_type', 'subject_id', 'purpose', 'code_hmac', 'target', 'expires_at', 'attempts', 'used_at',
+            'request_ip', 'created_at',
+        ],
+    ];
 
     private int $example;
     private int $other;
@@ -174,7 +197,7 @@ final class PolicyViewsTest extends DbTestCase
             'v_lists' => ['address', 'list_id', 'scope', 'max_message_kb'],
             'v_list_sender_rules' => ['address', 'rule_type', 'value'],
             'v_login_roles' => ['login', 'role'],
-            'v_portal_deployments' => ['id', 'job_type', 'payload', 'requested_by_type', 'requested_by_id'],
+            ...self::PORTAL_VIEW_COLUMNS,
         ];
 
         foreach ($expected as $view => $columns) {
@@ -207,14 +230,17 @@ final class PolicyViewsTest extends DbTestCase
         ], $rows);
     }
 
-    public function test_portal_view_is_updatable_with_a_cascaded_check_option(): void
+    public function test_portal_views_are_updatable_with_a_cascaded_check_option(): void
     {
-        $row = $this->pdo()->query(
-            "SELECT check_option, is_updatable FROM information_schema.views "
-            . "WHERE table_schema = DATABASE() AND table_name = 'v_portal_deployments'"
-        )->fetch(PDO::FETCH_NUM);
+        $stmt = $this->pdo()->prepare(
+            'SELECT check_option, is_updatable FROM information_schema.views '
+            . 'WHERE table_schema = DATABASE() AND table_name = ?'
+        );
 
-        $this->assertSame(['CASCADED', 'YES'], $row);
+        foreach (array_keys(self::PORTAL_VIEW_COLUMNS) as $view) {
+            $stmt->execute([$view]);
+            $this->assertSame(['CASCADED', 'YES'], $stmt->fetch(PDO::FETCH_NUM), $view);
+        }
     }
 
     public function test_migration_can_be_run_again(): void
@@ -556,6 +582,17 @@ final class PolicyViewsTest extends DbTestCase
         $this->assertSame(0, $this->deploymentCount());
     }
 
+    /** Every kick names the mailbox that asked for it, so the job runner can check it. */
+    public function test_portal_view_rejects_a_kick_without_a_requester(): void
+    {
+        $this->assertSqlError(
+            self::CHECK_OPTION_FAILED,
+            self::KICK,
+            ['doveadm_kick', $this->kickPayload(), 'mailbox', null]
+        );
+        $this->assertSame(0, $this->deploymentCount());
+    }
+
     public function test_portal_view_rejects_a_batch_with_one_bad_row(): void
     {
         $this->assertSqlError(
@@ -627,5 +664,69 @@ final class PolicyViewsTest extends DbTestCase
             ['doveadm_kick mailbox'],
             $this->col("SELECT CONCAT(job_type, ' ', requested_by_type) FROM v_portal_deployments")
         );
+    }
+
+    // ---- v_portal_sessions and v_portal_otp_codes --------------------------------
+
+    /**
+     * An admin session and an admin code exist next to a mailbox one. The portal views show
+     * only the mailbox rows, and deleting through them leaves the admin rows alone.
+     */
+    public function test_portal_session_and_code_views_show_only_mailbox_rows(): void
+    {
+        $admin = hash('sha256', 'admin-token');
+        $mailbox = hash('sha256', 'mailbox-token');
+        $insertSession = 'INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+            . "VALUES (?, ?, 1, '2030-01-01 00:00:00', '127.0.0.1', 'test')";
+        $this->exec($insertSession, [$admin, 'admin']);
+        $this->exec($insertSession, [$mailbox, 'mailbox']);
+        $insertCode = 'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
+            . "VALUES (?, 1, 'login', ?, '2030-01-01 00:00:00', '127.0.0.1')";
+        $this->exec($insertCode, ['admin', $admin]);
+        $this->exec($insertCode, ['mailbox', $mailbox]);
+
+        $this->assertSame([$mailbox], $this->col('SELECT token_hash FROM v_portal_sessions'));
+        $this->assertSame([$mailbox], $this->col('SELECT code_hmac FROM v_portal_otp_codes'));
+
+        $this->exec('DELETE FROM v_portal_sessions');
+        $this->exec('DELETE FROM v_portal_otp_codes');
+        $this->exec("UPDATE v_portal_sessions SET revoked_at = '2029-01-01 00:00:00'");
+        $this->exec('UPDATE v_portal_otp_codes SET attempts = 99');
+
+        // Only the admin rows are left, untouched: not revoked, no attempts counted.
+        $this->assertSame(['admin not-revoked'], $this->col(
+            "SELECT CONCAT(subject_type, ' ', IF(revoked_at IS NULL, 'not-revoked', 'revoked')) FROM sessions"
+        ));
+        $this->assertSame(['admin 0'], $this->col("SELECT CONCAT(subject_type, ' ', attempts) FROM otp_codes"));
+    }
+
+    public function test_portal_session_view_refuses_admin_sessions(): void
+    {
+        $hash = hash('sha256', 'token');
+
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, self::PORTAL_SESSION, [$hash, 'admin', 1]);
+
+        $this->exec(self::PORTAL_SESSION, [$hash, 'mailbox', $this->alice]);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_sessions SET subject_type = 'admin'");
+        $this->assertSqlError(
+            self::CHECK_OPTION_FAILED,
+            'REPLACE INTO v_portal_sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
+            . "VALUES (?, 'admin', 1, '2030-01-01 00:00:00', '203.0.113.5', 'test')",
+            [$hash]
+        );
+
+        $this->assertSame(['mailbox'], $this->col('SELECT subject_type FROM sessions'));
+    }
+
+    public function test_portal_code_view_refuses_admin_codes(): void
+    {
+        $hmac = hash('sha256', 'code');
+
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, self::PORTAL_OTP, ['admin', 1, $hmac]);
+
+        $this->exec(self::PORTAL_OTP, ['mailbox', $this->alice, $hmac]);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_otp_codes SET subject_type = 'admin'");
+
+        $this->assertSame(['mailbox'], $this->col('SELECT subject_type FROM otp_codes'));
     }
 }
