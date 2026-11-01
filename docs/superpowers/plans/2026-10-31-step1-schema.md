@@ -228,6 +228,7 @@ test_migrations_rerunnable: DELETE FROM schema_migrations; migrateAll() → no e
     - (d) list → member, for an active list, an active member row, and a member mailbox that is active (which means the member's own domain is active too);
     - (e) for each alias domain with an active target: `lp@alias_domain → lp@target` for every `v_local_addresses` row in the target domain.
   - `v_sender_login(sender, login)`: each active mailbox → itself; each active non-catch-all alias address → each target that is an active local mailbox.
+  - `v_rejected_recipients(email, reason)` (Ruling 11, added in fix round): in active domains, (1) non-active mailboxes, (2) lists that are not active or have no deliverable member, (3) non-catch-all aliases that are inactive or have no targets; plus (4) their `lp@alias_domain` variants for alias domains with an active target. Step 2 wires it as Postfix `check_recipient_access`, so these addresses are rejected instead of falling through to a catch-all.
   - Fixture helpers in the `Fixtures` trait:
     - `domain(string $name, string $status = 'active'): int`
     - `aliasDomain(string $alias, int $targetId): void`
@@ -342,7 +343,7 @@ test_portal_view_rejects_other_jobs: job_type 'dkim_generate' → errorInfo[1] =
 
 | User | Grants |
 |---|---|
-| `mail_ro` | SELECT on `v_domains`, `v_mailboxes`, `v_auth`, `v_aliases`, `v_sender_login` |
+| `mail_ro` | SELECT on `v_domains`, `v_mailboxes`, `v_auth`, `v_aliases`, `v_sender_login`, `v_rejected_recipients` |
 | `mail_policy` | SELECT on `v_domains`, `v_lists`, `v_list_sender_rules`, `v_login_roles`, `settings`; INSERT on `audit_log` |
 | `mail_app` | SELECT, INSERT, UPDATE, DELETE on every `TABLES` entry except `audit_log`; SELECT, INSERT on `audit_log` |
 | `mail_portal` | SELECT on `domains`, `mailboxes`, `lists`, `list_owners`, `settings`; UPDATE (`password_hash`, `recovery_email`, `recovery_verified_at`, `password_changed_at`) on `mailboxes`; SELECT, INSERT, UPDATE, DELETE on `forwarding_rules`, `list_members`, `otp_codes`, `sessions`; INSERT on `v_portal_deployments`, `audit_log` |
@@ -355,7 +356,7 @@ test_portal_view_rejects_other_jobs: job_type 'dkim_generate' → errorInfo[1] =
 test_users: Grants::USERS === the five names
 test_no_dangerous_grants: no statement for any user contains '*.*', 'ALL PRIVILEGES' or 'GRANT OPTION';
     the only '`.*' statement is mailctl's 'GRANT SELECT ON `mailhost`.*'
-test_mail_ro_reads_exactly_five_views: forUser('mail_ro','mailhost') === 5 statements, one per view above
+test_mail_ro_reads_exactly_six_views: forUser('mail_ro','mailhost') === 6 statements, one per view above
 
 // GrantsMatrixTest (integration; freshDatabase, migrateAll, provisionAll with random 32-char passwords,
 // connect with Connection::asUser over 127.0.0.1)
