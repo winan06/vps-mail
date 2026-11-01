@@ -5,7 +5,9 @@ declare(strict_types=1);
 
 use Mailhost\Cli\EnvFile;
 use Mailhost\Db\Connection;
+use Mailhost\Db\Grants;
 use Mailhost\Db\Migrator;
+use Mailhost\Db\UserProvisioner;
 
 $autoload = __DIR__ . '/../vendor/autoload.php';
 if (!is_file($autoload)) {
@@ -37,11 +39,16 @@ Usage: mailhostctl <command>
 Commands:
   migrate         Create the database if needed and apply pending migrations
   migrate:status  Show which migrations are applied or pending
-  db:users        Manage database users
+  db:users        Create or update the least-privilege database users and their grants
 
 Environment:
   MAILHOST_DB_ENV          env file with the database settings (default /etc/mailhost/db.env)
   MAILHOST_MIGRATIONS_DIR  directory with the migration files (default app/migrations)
+
+Env file keys read by db:users, besides the database settings:
+  DB_PASS_MAIL_RO, DB_PASS_MAIL_POLICY, DB_PASS_MAIL_APP, DB_PASS_MAIL_PORTAL, DB_PASS_MAILCTL
+                           passwords, 24 to 128 characters from A-Z a-z 0-9 + / = . _ ~ -
+  DB_USER_HOSTS            comma-separated hosts of the accounts (default localhost,127.0.0.1)
 
 TXT;
 
@@ -72,8 +79,37 @@ try {
             break;
 
         case 'db:users':
-            fwrite(STDERR, "mailhostctl: Not implemented\n");
-            exit(1);
+            $env = EnvFile::load(setting('MAILHOST_DB_ENV', '/etc/mailhost/db.env'));
+
+            $passwords = [];
+            $missing = [];
+            foreach (Grants::USERS as $user) {
+                $key = 'DB_PASS_' . strtoupper($user);
+                if (($env[$key] ?? '') === '') {
+                    $missing[] = $key;
+                } else {
+                    $passwords[$user] = $env[$key];
+                }
+            }
+            if ($missing !== []) {
+                throw new RuntimeException('Missing ' . implode(', ', $missing) . ' in the env file');
+            }
+
+            $hostList = ($env['DB_USER_HOSTS'] ?? '') !== '' ? $env['DB_USER_HOSTS'] : 'localhost,127.0.0.1';
+            $hosts = array_values(array_unique(array_filter(
+                array_map('trim', explode(',', $hostList)),
+                static fn (string $host): bool => $host !== ''
+            )));
+            $database = ($env['DB_NAME'] ?? '') !== '' ? $env['DB_NAME'] : 'mailhost';
+
+            (new UserProvisioner(Connection::root($env), $database, $hosts))->provisionAll($passwords);
+
+            foreach (Grants::USERS as $user) {
+                foreach ($hosts as $host) {
+                    echo "Provisioned $user@$host\n";
+                }
+            }
+            break;
 
         default:
             fwrite(STDERR, $usage);
