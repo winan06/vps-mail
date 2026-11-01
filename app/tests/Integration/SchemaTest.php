@@ -11,9 +11,11 @@ use PDOStatement;
 /**
  * The 23 base tables of migrations 0001 to 0004: constraints, cascades and seed data.
  *
- * Constraint failures are asserted on MariaDB's error number (PDOException::errorInfo[1]),
- * never on the message: 4025 for a failed CHECK, 1062 for a duplicate key and 1451 for a
- * blocked delete.
+ * Constraint failures are asserted on MariaDB's error number (PDOException::errorInfo[1]):
+ * 4025 for a failed CHECK, 1062 for a duplicate key and 1451 for a blocked delete. For a
+ * failed CHECK the test also names the constraint it expects, because a column with several
+ * checks (lowercase, format, not empty) fails on the first one MariaDB evaluates, and only the
+ * name shows which rule caught the value.
  */
 final class SchemaTest extends DbTestCase
 {
@@ -83,13 +85,21 @@ final class SchemaTest extends DbTestCase
         return (int) $this->pdo()->lastInsertId();
     }
 
-    /** @param list<mixed> $params */
-    private function assertSqlError(int $code, string $sql, array $params = []): void
+    /**
+     * Asserts that $sql fails with MariaDB error $code and, when $constraint is given, that the
+     * error names that CHECK constraint ("CONSTRAINT `chk_x` failed for ...").
+     *
+     * @param list<mixed> $params
+     */
+    private function assertSqlError(int $code, string $sql, array $params = [], ?string $constraint = null): void
     {
         try {
             $this->query($sql, $params);
         } catch (PDOException $e) {
             $this->assertSame($code, $e->errorInfo[1] ?? null, $e->getMessage());
+            if ($constraint !== null) {
+                $this->assertStringContainsString("CONSTRAINT `$constraint` failed", $e->getMessage());
+            }
 
             return;
         }
@@ -143,13 +153,19 @@ final class SchemaTest extends DbTestCase
 
     public function test_identifiers_must_be_lowercase(): void
     {
-        $this->assertSqlError(self::CHECK_FAILED, 'INSERT INTO domains (name) VALUES (?)', ['Example.com']);
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'INSERT INTO domains (name) VALUES (?)',
+            ['Example.com'],
+            'chk_domains_name_lc'
+        );
 
         $domainId = $this->domain('example.com');
         $this->assertSqlError(
             self::CHECK_FAILED,
             'INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES (?, ?, ?)',
-            [$domainId, 'Bob', self::HASH_ARGON]
+            [$domainId, 'Bob', self::HASH_ARGON],
+            'chk_mailboxes_local_part_lc'
         );
     }
 
@@ -160,7 +176,8 @@ final class SchemaTest extends DbTestCase
         $this->assertSqlError(
             self::CHECK_FAILED,
             'INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES (?, ?, ?)',
-            [$domainId, 'plain', 'plain']
+            [$domainId, 'plain', 'plain'],
+            'chk_mailboxes_password_hash_prefix'
         );
 
         $this->mailbox($domainId, 'argon', self::HASH_ARGON);
@@ -282,7 +299,9 @@ final class SchemaTest extends DbTestCase
         $this->assertSqlError(
             self::CHECK_FAILED,
             'INSERT INTO filter_global (id, tag_score, quarantine_score, reject_score, bound_min_score, bound_max_score) '
-            . 'VALUES (2, 6, 10, 15, 4, 25)'
+            . 'VALUES (2, 6, 10, 15, 4, 25)',
+            [],
+            'chk_filter_global_single_row'
         );
 
         // One policy row per domain.
@@ -293,15 +312,15 @@ final class SchemaTest extends DbTestCase
 
         // Thresholds must not decrease: tag <= quarantine <= reject.
         $other = $this->domain('other.org');
-        $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 16, 10, 15]);
-        $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 6, 16, 15]);
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET tag_score = 16');
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET quarantine_score = 16');
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_policies SET tag_score = 16');
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 16, 10, 15], 'chk_filter_policies_scores_ordered');
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 6, 16, 15], 'chk_filter_policies_scores_ordered');
+        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET tag_score = 16', [], 'chk_filter_global_scores_ordered');
+        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET quarantine_score = 16', [], 'chk_filter_global_scores_ordered');
+        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_policies SET tag_score = 16', [], 'chk_filter_policies_scores_ordered');
 
         // Equal thresholds are allowed, and the global bounds must be ordered.
         $this->query($insert, [$other, 8, 8, 8]);
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET bound_min_score = 26');
+        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET bound_min_score = 26', [], 'chk_filter_global_bounds_ordered');
     }
 
     public function test_sender_rule_value_rules(): void
@@ -309,11 +328,13 @@ final class SchemaTest extends DbTestCase
         $list = $this->mailList($this->domain('example.com'), 'team');
         $insert = 'INSERT INTO list_sender_rules (list_id, rule_type, value) VALUES (?, ?, ?)';
 
-        $this->assertSqlError(self::CHECK_FAILED, $insert, [$list, 'any_authenticated', 'x']);
-        $this->assertSqlError(self::CHECK_FAILED, $insert, [$list, 'address', '']);
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$list, 'any_authenticated', 'x'], 'chk_list_sender_rules_value_by_type');
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$list, 'address', ''], 'chk_list_sender_rules_value_by_type');
 
         $this->query($insert, [$list, 'any_authenticated', '']);
         $this->query($insert, [$list, 'address', 'boss@example.com']);
+        $this->query($insert, [$list, 'domain', 'example.com']);
+        $this->query($insert, [$list, 'role', 'super_admin']);
         $this->assertSqlError(self::DUPLICATE_KEY, $insert, [$list, 'address', 'boss@example.com']);
     }
 
@@ -322,18 +343,21 @@ final class SchemaTest extends DbTestCase
      *
      * @param list<mixed> $params
      */
-    public function test_format_checks_reject_bad_values(string $sql, array $params): void
+    public function test_format_checks_reject_bad_values(string $sql, array $params, string $constraint): void
     {
         $domainId = $this->domain('example.com');
         $this->mailbox($domainId, 'alice');
-        $alias = $this->insertId('INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)', [$domainId, 'sales']);
+        $this->insertId('INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)', [$domainId, 'sales']);
         $this->mailList($domainId, 'staff');
-        $this->assertGreaterThan(0, $alias);
 
-        $this->assertSqlError(self::CHECK_FAILED, $sql, $params);
+        $this->assertSqlError(self::CHECK_FAILED, $sql, $params, $constraint);
     }
 
-    /** @return array<string,array{string,list<mixed>}> */
+    /**
+     * Each case: the statement, its parameters and the CHECK constraint that must reject it.
+     *
+     * @return array<string,array{string,list<mixed>,string}>
+     */
     public function badValues(): array
     {
         $domain = "(SELECT id FROM domains WHERE name = 'example.com')";
@@ -343,94 +367,172 @@ final class SchemaTest extends DbTestCase
         $admin = 'INSERT INTO admins (username, email, password_hash, role_id) '
             . "VALUES (?, ?, ?, (SELECT id FROM roles WHERE name = 'domain_admin'))";
 
-        return [
-            'domain with an underscore' => ['INSERT INTO domains (name) VALUES (?)', ['bad_name.com']],
-            'domain starting with a hyphen' => ['INSERT INTO domains (name) VALUES (?)', ['-bad.com']],
-            'domain ending with a dot' => ['INSERT INTO domains (name) VALUES (?)', ['bad.com.']],
-            'domain with a trailing newline' => ['INSERT INTO domains (name) VALUES (?)', ["example.com\n"]],
-            'alias domain in uppercase' => [
-                "INSERT INTO domain_aliases (alias_domain, target_domain_id) VALUES (?, $domain)",
-                ['Alias.net'],
-            ],
+        $insertDomain = 'INSERT INTO domains (name) VALUES (?)';
+        $insertAliasDomain = "INSERT INTO domain_aliases (alias_domain, target_domain_id) VALUES (?, $domain)";
+        $insertMailbox = "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')";
+        $insertRecovery = 'INSERT INTO mailboxes (domain_id, local_part, password_hash, recovery_email) '
+            . "VALUES ($domain, 'carol', '\$2y\$10\$abc', ?)";
+        $insertAlias = "INSERT INTO aliases (domain_id, local_part) VALUES ($domain, ?)";
+        $insertTarget = "INSERT INTO alias_targets (alias_id, destination) VALUES ($alias, ?)";
+        $insertForward = 'INSERT INTO forwarding_rules (mailbox_id, destination, created_by_type, created_by_id) '
+            . "VALUES ($mailbox, ?, 'admin', 1)";
+        $insertList = "INSERT INTO lists (domain_id, local_part, scope) VALUES ($domain, ?, 'domain')";
+        $insertRule = "INSERT INTO list_sender_rules (list_id, rule_type, value) VALUES ($list, ?, ?)";
+        $insertOtpTarget = 'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, target, expires_at, request_ip) '
+            . "VALUES ('mailbox', 1, 'verify_email', REPEAT('a', 64), ?, UTC_TIMESTAMP(), '127.0.0.1')";
+
+        $cases = [
+            'domain with an underscore' => [$insertDomain, ['bad_name.com'], 'chk_domains_name_format'],
+            'domain starting with a hyphen' => [$insertDomain, ['-bad.com'], 'chk_domains_name_format'],
+            'domain ending with a dot' => [$insertDomain, ['bad.com.'], 'chk_domains_name_format'],
+            'domain with a trailing newline' => [$insertDomain, ["example.com\n"], 'chk_domains_name_format'],
+            'alias domain in uppercase' => [$insertAliasDomain, ['Alias.net'], 'chk_domain_aliases_alias_domain_lc'],
             'dkim selector in uppercase' => [
                 "INSERT INTO dkim_keys (domain_id, selector, public_key) VALUES ($domain, ?, 'KEY')",
                 ['Mail'],
+                'chk_dkim_keys_selector_lc',
             ],
             'dkim selector with an underscore' => [
                 "INSERT INTO dkim_keys (domain_id, selector, public_key) VALUES ($domain, ?, 'KEY')",
                 ['mail_1'],
+                'chk_dkim_keys_selector_format',
             ],
             'dkim selector with a trailing newline' => [
                 "INSERT INTO dkim_keys (domain_id, selector, public_key) VALUES ($domain, ?, 'KEY')",
                 ["mail\n"],
+                'chk_dkim_keys_selector_format',
             ],
-            'mailbox local part with a space' => [
-                "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
-                ['a b'],
+            'mailbox local part with a space' => [$insertMailbox, ['a b'], 'chk_mailboxes_local_part_format'],
+            'mailbox local part with a trailing newline' => [$insertMailbox, ["alice\n"], 'chk_mailboxes_local_part_format'],
+            'mailbox local part empty' => [$insertMailbox, [''], 'chk_mailboxes_local_part_format'],
+            'recovery email in uppercase' => [$insertRecovery, ['Carol@Example.com'], 'chk_mailboxes_recovery_email_lc'],
+            'alias local part in uppercase' => [$insertAlias, ['Info'], 'chk_aliases_local_part_lc'],
+            'alias target without an address' => [$insertTarget, ['nobody'], 'chk_alias_targets_destination_format'],
+            'alias target without a domain' => [$insertTarget, ['nobody@'], 'chk_alias_targets_destination_format'],
+            'alias target in uppercase' => [$insertTarget, ['Bob@example.com'], 'chk_alias_targets_destination_lc'],
+            'forwarding destination without an address' => [$insertForward, ['nobody'], 'chk_forwarding_rules_destination_format'],
+            'forwarding destination in uppercase' => [$insertForward, ['Carol@Example.com'], 'chk_forwarding_rules_destination_lc'],
+            'list local part empty' => [$insertList, [''], 'chk_lists_local_part_not_empty'],
+            'list local part in uppercase' => [$insertList, ['Staff2'], 'chk_lists_local_part_lc'],
+            'list sender rule value in uppercase' => [$insertRule, ['address', 'Boss@example.com'], 'chk_list_sender_rules_value_lc'],
+            'list sender rule address with a comma' => [
+                $insertRule,
+                ['address', 'boss@example.com,all@example.com'],
+                'chk_list_sender_rules_value_format',
             ],
-            'mailbox local part with a trailing newline' => [
-                "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
-                ["alice\n"],
+            'list sender rule address that is a domain' => [$insertRule, ['address', 'example.com'], 'chk_list_sender_rules_value_format'],
+            'list sender rule domain that is an address' => [$insertRule, ['domain', 'boss@example.com'], 'chk_list_sender_rules_value_format'],
+            'list sender rule domain with one label' => [$insertRule, ['domain', 'localhost'], 'chk_list_sender_rules_value_format'],
+            'list sender rule role with a space' => [$insertRule, ['role', 'super admin'], 'chk_list_sender_rules_value_format'],
+            'list sender rule role with a trailing newline' => [$insertRule, ['role', "super_admin\n"], 'chk_list_sender_rules_value_format'],
+            'admin username too short' => [$admin, ['ab', 'ab@example.com', self::HASH_ARGON], 'chk_admins_username_format'],
+            'admin username in uppercase' => [$admin, ['Admin1', 'admin1@example.com', self::HASH_ARGON], 'chk_admins_username_format'],
+            'admin username with a trailing newline' => [
+                $admin,
+                ["admin1\n", 'admin1@example.com', self::HASH_ARGON],
+                'chk_admins_username_format',
             ],
-            'mailbox local part empty' => [
-                "INSERT INTO mailboxes (domain_id, local_part, password_hash) VALUES ($domain, ?, '\$2y\$10\$abc')",
-                [''],
-            ],
-            'recovery email in uppercase' => [
-                "INSERT INTO mailboxes (domain_id, local_part, password_hash, recovery_email) "
-                . "VALUES ($domain, 'carol', '\$2y\$10\$abc', ?)",
-                ['Carol@Example.com'],
-            ],
-            'alias local part in uppercase' => [
-                "INSERT INTO aliases (domain_id, local_part) VALUES ($domain, ?)",
-                ['Info'],
-            ],
-            'alias target without an address' => [
-                "INSERT INTO alias_targets (alias_id, destination) VALUES ($alias, ?)",
-                ['nobody'],
-            ],
-            'alias target without a domain' => [
-                "INSERT INTO alias_targets (alias_id, destination) VALUES ($alias, ?)",
-                ['nobody@'],
-            ],
-            'alias target in uppercase' => [
-                "INSERT INTO alias_targets (alias_id, destination) VALUES ($alias, ?)",
-                ['Bob@example.com'],
-            ],
-            'forwarding destination without an address' => [
-                "INSERT INTO forwarding_rules (mailbox_id, destination, created_by_type, created_by_id) "
-                . "VALUES ($mailbox, ?, 'admin', 1)",
-                ['nobody'],
-            ],
-            'list local part empty' => [
-                "INSERT INTO lists (domain_id, local_part, scope) VALUES ($domain, ?, 'domain')",
-                [''],
-            ],
-            'list sender rule value in uppercase' => [
-                "INSERT INTO list_sender_rules (list_id, rule_type, value) VALUES ($list, 'address', ?)",
-                ['Boss@example.com'],
-            ],
-            'admin username too short' => [$admin, ['ab', 'ab@example.com', self::HASH_ARGON]],
-            'admin username in uppercase' => [$admin, ['Admin1', 'admin1@example.com', self::HASH_ARGON]],
-            'admin username with a trailing newline' => [$admin, ["admin1\n", 'admin1@example.com', self::HASH_ARGON]],
-            'admin email in uppercase' => [$admin, ['admin1', 'Admin1@Example.com', self::HASH_ARGON]],
-            'admin password hash not hashed' => [$admin, ['admin1', 'admin1@example.com', 'secret']],
+            'admin email in uppercase' => [$admin, ['admin1', 'Admin1@Example.com', self::HASH_ARGON], 'chk_admins_email_lc'],
+            'admin password hash not hashed' => [$admin, ['admin1', 'admin1@example.com', 'secret'], 'chk_admins_password_hash_prefix'],
             'otp code hmac in uppercase hex' => [
-                "INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) "
+                'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, expires_at, request_ip) '
                 . "VALUES ('mailbox', 1, 'login', ?, UTC_TIMESTAMP(), '127.0.0.1')",
                 [str_repeat('A', 64)],
+                'chk_otp_codes_code_hmac_lc',
             ],
             'session token hash in uppercase hex' => [
-                "INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) "
+                'INSERT INTO sessions (token_hash, subject_type, subject_id, expires_at, ip, user_agent) '
                 . "VALUES (?, 'admin', 1, UTC_TIMESTAMP(), '127.0.0.1', 'test')",
                 [str_repeat('A', 64)],
+                'chk_sessions_token_hash_lc',
             ],
-            'otp target in uppercase' => [
-                "INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, target, expires_at, request_ip) "
-                . "VALUES ('mailbox', 1, 'verify_email', REPEAT('a', 64), ?, UTC_TIMESTAMP(), '127.0.0.1')",
-                ['New@Example.com'],
-            ],
+            'otp target in uppercase' => [$insertOtpTarget, ['New@Example.com'], 'chk_otp_codes_target_lc'],
         ];
+
+        // Dots only between atoms: "." and ".." would make the maildir domain/local_part/
+        // climb out of the domain directory.
+        $badLocalParts = ['..', '.', 'a.', '.a', 'a..b'];
+        $localPartColumns = [
+            'mailbox' => [$insertMailbox, 'chk_mailboxes_local_part_format'],
+            'alias' => [$insertAlias, 'chk_aliases_local_part_format'],
+            'list' => [$insertList, 'chk_lists_local_part_format'],
+        ];
+        foreach ($localPartColumns as $label => [$sql, $constraint]) {
+            foreach ($badLocalParts as $value) {
+                $cases["$label local part \"$value\""] = [$sql, [$value], $constraint];
+            }
+        }
+
+        // Exactly one @ and nothing Postfix or a mail header would read as a second address.
+        $badAddresses = [
+            'a comma' => 'me@gmail.com,all@example.com',
+            'a space' => 'a b@x.com',
+            'two @' => 'a@b@c.com',
+            'quotes' => '"a"@x.com',
+            'angle brackets' => '<a@x.com>',
+            'a trailing newline' => "a@x.com\n",
+        ];
+        $addressColumns = [
+            'alias target' => [$insertTarget, [], 'chk_alias_targets_destination_format'],
+            'forwarding destination' => [$insertForward, [], 'chk_forwarding_rules_destination_format'],
+            'recovery email' => [$insertRecovery, [], 'chk_mailboxes_recovery_email_format'],
+            'admin email' => [$admin, ['admin1'], 'chk_admins_email_format'],
+        ];
+        foreach ($addressColumns as $label => [$sql, $before, $constraint]) {
+            foreach ($badAddresses as $what => $value) {
+                $params = [...$before, $value];
+                if ($label === 'admin email') {
+                    $params[] = self::HASH_ARGON;
+                }
+                $cases["$label with $what"] = [$sql, $params, $constraint];
+            }
+        }
+        foreach (['a comma', 'a trailing newline'] as $what) {
+            $cases["otp target with $what"] = [$insertOtpTarget, [$badAddresses[$what]], 'chk_otp_codes_target_format'];
+        }
+
+        // At least two labels, single dots, no hyphen at either end of a label.
+        $badDomains = ['localhost', 'a..b.com', '-a.com'];
+        foreach ($badDomains as $value) {
+            $cases["domain \"$value\""] = [$insertDomain, [$value], 'chk_domains_name_format'];
+            $cases["alias domain \"$value\""] = [$insertAliasDomain, [$value], 'chk_domain_aliases_alias_domain_format'];
+        }
+
+        return $cases;
+    }
+
+    /**
+     * The tightened formats still take the ordinary shapes: plus and dot addressing, hyphens,
+     * digits, punycode labels and deep subdomains.
+     */
+    public function test_format_checks_accept_valid_values(): void
+    {
+        $domainId = $this->domain('xn--bcher-kva.example');
+        $this->domain('mail-1.sub.example.co');
+        $this->query('INSERT INTO domain_aliases (alias_domain, target_domain_id) VALUES (?, ?)', ['a-b.c-d.example', $domainId]);
+
+        $mailbox = $this->mailbox($domainId, 'first.last+tag_x-1');
+        $this->query('UPDATE mailboxes SET recovery_email = ? WHERE id = ?', ['me+recovery@mail-1.sub.example.co', $mailbox]);
+        $alias = $this->insertId('INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)', [$domainId, 'no-reply']);
+        $this->query('INSERT INTO alias_targets (alias_id, destination) VALUES (?, ?)', [$alias, 'first.last+tag_x-1@xn--bcher-kva.example']);
+        $this->query(
+            'INSERT INTO forwarding_rules (mailbox_id, destination, created_by_type, created_by_id) VALUES (?, ?, ?, ?)',
+            [$mailbox, 'a_b@x1.io', 'mailbox', $mailbox]
+        );
+        $list = $this->mailList($domainId, 'all-staff.2026');
+        $insertRule = 'INSERT INTO list_sender_rules (list_id, rule_type, value) VALUES (?, ?, ?)';
+        $this->query($insertRule, [$list, 'address', 'boss.one@a-b.c-d.example']);
+        $this->query($insertRule, [$list, 'domain', 'mail-1.sub.example.co']);
+        $this->query($insertRule, [$list, 'role', 'domain_admin']);
+        $this->admin('ops.admin');
+
+        $this->assertSame(
+            ['all-staff.2026', 'first.last+tag_x-1', 'no-reply'],
+            $this->pdo()->query(
+                'SELECT local_part FROM mailboxes UNION SELECT local_part FROM aliases UNION SELECT local_part FROM lists '
+                . 'ORDER BY local_part'
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
     }
 
     public function test_catch_all_alias_is_rejected(): void
@@ -440,7 +542,8 @@ final class SchemaTest extends DbTestCase
         $this->assertSqlError(
             self::CHECK_FAILED,
             'INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)',
-            [$domainId, '']
+            [$domainId, ''],
+            'chk_aliases_local_part_not_empty'
         );
         $this->assertNull($this->scalar(
             "SELECT column_default FROM information_schema.columns WHERE table_schema = DATABASE() "

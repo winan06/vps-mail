@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS lists (
     UNIQUE KEY uq_lists_domain_local_part (domain_id, local_part),
     CONSTRAINT fk_lists_domain FOREIGN KEY (domain_id) REFERENCES domains (id) ON DELETE CASCADE,
     CONSTRAINT chk_lists_local_part_lc CHECK (local_part = LOWER(local_part)),
-    CONSTRAINT chk_lists_local_part_not_empty CHECK (local_part <> '')
+    CONSTRAINT chk_lists_local_part_not_empty CHECK (local_part <> ''),
+    CONSTRAINT chk_lists_local_part_format CHECK (local_part REGEXP '^[a-z0-9_+-]+(\\.[a-z0-9_+-]+)*\\z')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS list_members (
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS list_owners (
     CONSTRAINT fk_list_owners_mailbox FOREIGN KEY (mailbox_id) REFERENCES mailboxes (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- value is empty exactly for the any_authenticated rule type.
+-- value is empty exactly for the any_authenticated rule type. Otherwise it is an address,
+-- a domain or a role name, in the formats of 0001 (roles: lowercase letters and _).
 CREATE TABLE IF NOT EXISTS list_sender_rules (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     list_id INT UNSIGNED NOT NULL,
@@ -47,5 +49,11 @@ CREATE TABLE IF NOT EXISTS list_sender_rules (
     UNIQUE KEY uq_list_sender_rules_list_type_value (list_id, rule_type, value),
     CONSTRAINT fk_list_sender_rules_list FOREIGN KEY (list_id) REFERENCES lists (id) ON DELETE CASCADE,
     CONSTRAINT chk_list_sender_rules_value_lc CHECK (value = LOWER(value)),
-    CONSTRAINT chk_list_sender_rules_value_by_type CHECK ((rule_type = 'any_authenticated') = (value = ''))
+    CONSTRAINT chk_list_sender_rules_value_by_type CHECK ((rule_type = 'any_authenticated') = (value = '')),
+    CONSTRAINT chk_list_sender_rules_value_format CHECK (
+        rule_type = 'any_authenticated'
+        OR (rule_type = 'address' AND value REGEXP '^[a-z0-9_+-]+(\\.[a-z0-9_+-]+)*@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\z')
+        OR (rule_type = 'domain' AND value REGEXP '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\z')
+        OR (rule_type = 'role' AND value REGEXP '^[a-z_]+\\z')
+    )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

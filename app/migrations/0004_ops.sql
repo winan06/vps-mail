@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS quarantine_items (
     CONSTRAINT fk_quarantine_items_domain FOREIGN KEY (domain_id) REFERENCES domains (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- target is the new address for a verify_email code.
+-- target is the new address for a verify_email code, in the address format of 0001.
 CREATE TABLE IF NOT EXISTS otp_codes (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     subject_type ENUM('mailbox', 'admin') NOT NULL,
@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS otp_codes (
     PRIMARY KEY (id),
     KEY ix_otp_codes_subject_purpose (subject_type, subject_id, purpose),
     CONSTRAINT chk_otp_codes_code_hmac_lc CHECK (code_hmac = LOWER(code_hmac)),
-    CONSTRAINT chk_otp_codes_target_lc CHECK (target = LOWER(target))
+    CONSTRAINT chk_otp_codes_target_lc CHECK (target = LOWER(target)),
+    CONSTRAINT chk_otp_codes_target_format CHECK (target REGEXP '^[a-z0-9_+-]+(\\.[a-z0-9_+-]+)*@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\z')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS sessions (
