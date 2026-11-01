@@ -126,6 +126,7 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mail_ro', 'SELECT * FROM mailboxes', false);
         $add('mail_ro', 'SELECT * FROM v_lists', false);
         $add('mail_ro', 'SELECT * FROM v_local_addresses', false);
+        $add('mail_ro', 'SELECT * FROM v_list_addresses', false);
         $add('mail_ro', 'SELECT * FROM v_rejected_local', false);
         $add('mail_ro', 'SELECT * FROM schema_migrations', false);
         $add('mail_ro', self::AUDIT_INSERT, false);
@@ -139,6 +140,7 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mail_policy', 'SELECT * FROM audit_log', false);
         $add('mail_policy', "UPDATE settings SET value = '1'", false);
         $add('mail_policy', 'SELECT * FROM v_local_addresses', false);
+        $add('mail_policy', 'SELECT * FROM v_list_addresses', false);
 
         $add('mail_app', 'UPDATE mailboxes SET quota_mb=quota_mb', true);
         $add('mail_app', 'SELECT * FROM audit_log', true);

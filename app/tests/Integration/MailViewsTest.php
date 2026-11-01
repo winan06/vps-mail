@@ -22,6 +22,7 @@ final class MailViewsTest extends DbTestCase
     private const COLUMNS = [
         'v_domains' => ['name'],
         'v_local_addresses' => ['domain_id', 'local_part'],
+        'v_list_addresses' => ['email'],
         'v_mailboxes' => ['email', 'maildir', 'quota_mb'],
         'v_auth' => ['email', 'password'],
         'v_aliases' => ['source', 'destination'],
@@ -411,6 +412,184 @@ final class MailViewsTest extends DbTestCase
         $this->forward($this->erin, 'erin@gmail.com', false);
 
         $this->assertSame([], $this->col("SELECT destination FROM v_aliases WHERE source LIKE 'erin@%'"));
+    }
+
+    // ---- external forwarding policy ----------------------------------------------
+
+    /**
+     * The three levels of the external-forwarding policy, each as [deny, allow] statements.
+     * The domain and mailbox levels are set for example.com, carol and dave.
+     *
+     * @return array<string,array{string,string}>
+     */
+    public static function forwardingPolicyLevels(): array
+    {
+        return [
+            'global setting' => [
+                "UPDATE settings SET value = 'deny' WHERE `key` = 'external_forwarding'",
+                "UPDATE settings SET value = 'allow' WHERE `key` = 'external_forwarding'",
+            ],
+            'domain' => [
+                "UPDATE domains SET external_forwarding = 'deny' WHERE name = 'example.com'",
+                "UPDATE domains SET external_forwarding = 'inherit' WHERE name = 'example.com'",
+            ],
+            'mailbox' => [
+                "UPDATE mailboxes SET external_forwarding = 'deny' WHERE local_part IN ('carol', 'dave')",
+                "UPDATE mailboxes SET external_forwarding = 'inherit' WHERE local_part IN ('carol', 'dave')",
+            ],
+        ];
+    }
+
+    /**
+     * Tightening the policy stops existing external forwards on the next lookup, like a
+     * suspension, and loosening it brings them back. carol (forward-only) then has no row
+     * at all and is delivered to her own mailbox through v_mailboxes; dave keeps his copy.
+     *
+     * @dataProvider forwardingPolicyLevels
+     */
+    public function test_external_forward_stops_as_soon_as_any_level_denies_it(string $deny, string $allow): void
+    {
+        $this->exec($deny);
+
+        $this->assertSame([], $this->destinations('carol@example.com'));
+        $this->assertSame(['carol@example.com'], $this->col("SELECT email FROM v_mailboxes WHERE email = 'carol@example.com'"));
+        $this->assertSame(['dave@example.com'], $this->destinations('dave@example.com'));
+
+        $this->exec($allow);
+
+        $this->assertSame(['carol@gmail.com'], $this->destinations('carol@example.com'));
+        $this->assertSame(['dave@example.com', 'dave@gmail.com'], $this->destinations('dave@example.com'));
+    }
+
+    public function test_missing_policy_setting_denies_external_forwarding(): void
+    {
+        $this->exec("DELETE FROM settings WHERE `key` = 'external_forwarding'");
+
+        $this->assertSame([], $this->destinations('carol@example.com'));
+        $this->assertSame(['dave@example.com'], $this->destinations('dave@example.com'));
+    }
+
+    public function test_mailbox_deny_affects_only_that_mailbox(): void
+    {
+        $this->exec("UPDATE mailboxes SET external_forwarding = 'deny' WHERE id = ?", [$this->carol]);
+
+        $this->assertSame([], $this->destinations('carol@example.com'));
+        $this->assertSame(['dave@example.com', 'dave@gmail.com'], $this->destinations('dave@example.com'));
+    }
+
+    /**
+     * A destination in a hosted domain (real or alias, whatever its status) is not external,
+     * so it survives a deny at every level.
+     */
+    public function test_forward_to_a_hosted_address_survives_every_deny(): void
+    {
+        $this->forward($this->alice, 'carol@example.com', true);
+        $this->forward($this->alice, 'erin@other.org', true);
+        $this->forward($this->alice, 'someone@example.net', true);
+        $this->forward($this->alice, 'alice@outside.example', true);
+
+        foreach (self::forwardingPolicyLevels() as [$deny]) {
+            $this->exec($deny);
+        }
+        $this->exec("UPDATE mailboxes SET external_forwarding = 'deny' WHERE id = ?", [$this->alice]);
+
+        $this->assertSame(
+            ['alice@example.com', 'carol@example.com', 'erin@other.org', 'someone@example.net'],
+            $this->destinations('alice@example.com')
+        );
+        $this->assertSame([], $this->col("SELECT destination FROM v_aliases WHERE destination LIKE '%@gmail.com'"));
+    }
+
+    // ---- aliases and forwards that point at a list -------------------------------
+
+    /**
+     * Creates all@example.com, an active list whose only member is alice.
+     */
+    private function allList(): int
+    {
+        $list = $this->mailList($this->example, 'all');
+        $this->member($list, $this->alice);
+
+        return $list;
+    }
+
+    /**
+     * Postfix would expand all@example.com after the alias, but the list policy service only
+     * sees the envelope recipient, so an alias to a list would bypass the list's sender rules.
+     * An alias whose only targets are lists therefore expands to nothing.
+     */
+    public function test_alias_whose_only_target_is_a_list_has_no_row(): void
+    {
+        $this->allList();
+        $this->alias($this->example, 'everyone', ['all@example.com', 'all@example.net']);
+
+        $this->assertSame([], $this->destinations('everyone@example.com'));
+        $this->assertSame(['alice@example.com'], $this->destinations('all@example.com'));
+    }
+
+    public function test_alias_with_a_list_target_and_a_normal_target_keeps_only_the_normal_target(): void
+    {
+        $this->allList();
+        $this->alias($this->example, 'mixed', ['all@example.com', 'carol@example.com']);
+
+        $this->assertSame(['carol@example.com'], $this->destinations('mixed@example.com'));
+    }
+
+    public function test_forward_to_a_list_is_dropped(): void
+    {
+        $this->allList();
+        $this->forward($this->dave, 'all@example.com', true);
+        $this->forward($this->dave, 'all@example.net', true);
+        $this->forward($this->alice, 'all@example.com', false);
+
+        $this->assertSame(['dave@example.com', 'dave@gmail.com'], $this->destinations('dave@example.com'));
+
+        // alice's only rule is a forward-only rule to a list: no row, so she gets her own mail.
+        $this->assertSame([], $this->destinations('alice@example.com'));
+        $this->assertSame(['alice@example.com'], $this->col("SELECT email FROM v_mailboxes WHERE email = 'alice@example.com'"));
+    }
+
+    /**
+     * A list that is suspended now may be reactivated later, so its addresses are blocked
+     * as targets whatever the status of the list or its domain.
+     */
+    public function test_targets_that_are_lists_of_any_status_are_dropped(): void
+    {
+        $this->mailList($this->other, 'news');
+        $this->alias($this->example, 'relay', ['old@example.com', 'news@other.org', 'news@other.net', 'carol@example.com']);
+        $this->forward($this->dave, 'old@example.net', true);
+
+        $this->assertSame(['carol@example.com'], $this->destinations('relay@example.com'));
+        $this->assertSame(['dave@example.com', 'dave@gmail.com'], $this->destinations('dave@example.com'));
+    }
+
+    public function test_v_list_addresses_has_every_spelling_of_every_list(): void
+    {
+        $this->mailList($this->other, 'news');
+
+        $this->assertSame(
+            [
+                'news@other.net',
+                'news@other.org',
+                'old@example.com',
+                'old@example.net',
+                'team@example.com',
+                'team@example.net',
+            ],
+            $this->col('SELECT email FROM v_list_addresses')
+        );
+    }
+
+    /** all@b.com is not a list when b.com is a real domain, even if b.com is also an alias of example.com. */
+    public function test_list_spelling_at_an_alias_domain_named_like_a_real_domain_is_not_a_list(): void
+    {
+        $this->allList();
+        $this->domain('b.com');
+        $this->aliasDomain('b.com', $this->example);
+        $this->alias($this->example, 'partner', ['all@b.com']);
+
+        $this->assertSame([], $this->col("SELECT email FROM v_list_addresses WHERE email LIKE '%@b.com'"));
+        $this->assertSame(['all@b.com'], $this->destinations('partner@example.com'));
     }
 
     // ---- aliases -----------------------------------------------------------------

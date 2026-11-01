@@ -149,6 +149,7 @@ final class GrantsTest extends TestCase
         foreach (Grants::USERS as $user) {
             foreach (Grants::forUser($user, 'mailhost') as $statement) {
                 $this->assertStringNotContainsString('v_local_addresses', $statement, $user);
+                $this->assertStringNotContainsString('v_list_addresses', $statement, $user);
                 $this->assertStringNotContainsString('v_rejected_local', $statement, $user);
                 $this->assertStringNotContainsString('schema_migrations', $statement, $user);
             }

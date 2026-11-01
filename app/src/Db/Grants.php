@@ -18,8 +18,9 @@ use InvalidArgumentException;
  *  - mailctl: the root-run job runner, which reads everything and writes only what its jobs change.
  *
  * Nothing here grants a global privilege, GRANT OPTION or write access to audit_log rows
- * after insertion. The helper views v_local_addresses and v_rejected_local and the table
- * schema_migrations are never named; only mailctl, which reads the whole database, can see them.
+ * after insertion. The helper views v_local_addresses, v_list_addresses and v_rejected_local and
+ * the table schema_migrations are never named; only mailctl, which reads the whole database, can
+ * see them.
  */
 final class Grants
 {

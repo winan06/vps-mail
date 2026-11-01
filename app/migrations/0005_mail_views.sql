@@ -14,9 +14,9 @@
 --     b.com's mail on behalf of example.com's users.
 --   * Every text column is ascii_bin, like the identifier columns of the base tables.
 --   * Safe to re-run: CREATE OR REPLACE VIEW. Views are listed in dependency order,
---     so v_local_addresses comes before v_aliases, which reads it.
---   * v_local_addresses and v_rejected_local are internal helpers and are never granted
---     to a service user.
+--     so v_local_addresses and v_list_addresses come before v_aliases, which reads them.
+--   * v_local_addresses, v_list_addresses and v_rejected_local are internal helpers and are
+--     never granted to a service user.
 
 -- Every address that exists as a local recipient: active mailboxes, active aliases
 -- and active lists. UNION removes duplicates.
@@ -35,6 +35,22 @@ SELECT l.domain_id, l.local_part
 FROM lists l
 JOIN domains d ON d.id = l.domain_id
 WHERE l.status = 'active' AND d.status = 'active';
+
+-- Every address of every list, whatever the status of the list or its domain: lp@domain,
+-- plus lp@alias_domain for each alias domain of the list's domain (not for an alias domain
+-- that is also a real domain). v_aliases drops alias targets and forwarding destinations
+-- found here: the list policy service checks the sender against the envelope recipient
+-- only, so an alias or forward to a list would let anyone post to it. A list that is
+-- suspended today may be reactivated, hence "any status".
+CREATE OR REPLACE VIEW v_list_addresses AS
+SELECT CONCAT(l.local_part, '@', d.name) AS email
+FROM lists l
+JOIN domains d ON d.id = l.domain_id
+UNION ALL
+SELECT CONCAT(l.local_part, '@', da.alias_domain)
+FROM lists l
+JOIN domain_aliases da ON da.target_domain_id = l.domain_id
+WHERE NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain);
 
 -- Domains Postfix accepts mail for: active domains plus the alias domains of active domains
 -- (an alias domain that is also a real domain is that real domain, see above).
@@ -72,13 +88,21 @@ JOIN domains d ON d.id = m.domain_id
 WHERE m.status = 'active' AND d.status = 'active';
 
 -- Postfix virtual alias map: one row per (source, destination). Five parts, in order:
---   a. alias targets;
---   b. the active forwarding rules of an active mailbox;
+--   a. alias targets, except targets that are lists (v_list_addresses). An alias whose only
+--      targets are lists has no row, so Postfix rejects it as an unknown address;
+--   b. the active forwarding rules of an active mailbox, except destinations that are lists,
+--      and except external destinations while external forwarding is not allowed. A
+--      destination is internal when its domain is in domains or domain_aliases (any status);
+--      an external one needs settings.external_forwarding = 'allow' (a missing row denies)
+--      and external_forwarding = 'inherit' on both the domain and the mailbox. The policy
+--      is read on every lookup, so tightening it stops existing forwards at once;
 --   c. the identity row, mailbox to itself. Postfix replaces an address with the rows it
 --      finds for it, so a forwarded mailbox keeps receiving its own copy only if it also
 --      maps to itself. The row is there when the mailbox has no active rules, or when any
 --      active rule has keep_copy = 1, and left out only when every active rule is
---      forward-only (keep_copy = 0);
+--      forward-only (keep_copy = 0). It looks at the rules as stored, not at what b kept:
+--      a mailbox whose rules b drops entirely has no row at all, and Postfix then delivers
+--      to it through v_mailboxes;
 --   d. list to member, for an active list and an active member row whose mailbox is
 --      active (so the member's own domain is active too);
 --   e. alias domains: lp@alias_domain to lp@target for every local address of an
@@ -92,6 +116,7 @@ FROM aliases a
 JOIN domains d ON d.id = a.domain_id
 JOIN alias_targets t ON t.alias_id = a.id
 WHERE a.active = 1 AND d.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM v_list_addresses la WHERE la.email = t.destination)
 UNION ALL
 SELECT
     CONCAT(m.local_part, '@', d.name),
@@ -100,6 +125,16 @@ FROM forwarding_rules f
 JOIN mailboxes m ON m.id = f.mailbox_id
 JOIN domains d ON d.id = m.domain_id
 WHERE f.active = 1 AND m.status = 'active' AND d.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM v_list_addresses la WHERE la.email = f.destination)
+  AND (
+      EXISTS (SELECT 1 FROM domains hd WHERE hd.name = SUBSTRING_INDEX(f.destination, '@', -1))
+      OR EXISTS (SELECT 1 FROM domain_aliases hda WHERE hda.alias_domain = SUBSTRING_INDEX(f.destination, '@', -1))
+      OR (
+          d.external_forwarding = 'inherit'
+          AND m.external_forwarding = 'inherit'
+          AND EXISTS (SELECT 1 FROM settings s WHERE s.`key` = 'external_forwarding' AND s.value = 'allow')
+      )
+  )
 UNION ALL
 SELECT
     CONCAT(m.local_part, '@', d.name),
