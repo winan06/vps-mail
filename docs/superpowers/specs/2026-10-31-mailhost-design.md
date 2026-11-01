@@ -1,7 +1,7 @@
 # Mailhost — Design Spec
 
 **Date:** 2026-10-31
-**Status:** Draft, awaiting review
+**Status:** Step 1 built (branch step1-schema). §17 version 1 additions drafted 2026-11-01, awaiting review.
 **Source requirements:** "Multi-Domain Email Hosting and Management System" SRS (Postfix, Dovecot, Rspamd, ClamAV)
 **Build approach:** New system, built from scratch.
 
@@ -357,7 +357,7 @@ Planned design, for when the work resumes:
 
 ## 14. Build order
 
-Each step gets its own implementation plan, and each ends with its tests passing.
+Each step gets its own implementation plan, and each ends with its tests passing. The version 1 additions (§17) add a step 1b and extend steps 2–8; see §17.15.
 
 | # | Step | Done when |
 |---|---|---|
@@ -393,3 +393,165 @@ Each step gets its own implementation plan, and each ends with its tests passing
 | §6 security | §5.3, §8.2–8.4, §9 |
 | §9.1 monitoring | §11 |
 | §9.2–9.3 backup and recovery | §12 (deferred) |
+
+## 17. Version 1 additions (added 2026-11-01)
+
+Twelve features added after step 1. None of them adds webmail, and no interface shows message content. They follow the step 1 rules:
+- lowercase ASCII addresses with the same format checks;
+- column-level grants and `WITH CHECK OPTION` views for the portal;
+- every change to mail routing goes through the SQL views and their tests.
+
+New tables come in new migrations (0007 onward); 0001–0006 stay as reviewed.
+
+### 17.1 Company directory (read-only CardDAV)
+
+- **What:** each domain gets a read-only address book of its active mailboxes, with display name, job title, department and phone.
+- **Data:** new mailbox columns `display_name`, `job_title`, `department`, `phone`, `directory_visible` (default on). Users edit their own in the portal, and admins edit any in their domains. The new view `v_directory` lists active, visible mailboxes in active domains, including shared mailboxes (17.8).
+- **Server:** SabreDAV (Ubuntu package `php-sabre-dav`) inside the portal pool at `https://MAIL_HOST/dav/`, with a read-only backend over `v_directory`.
+- **Login:** mailbox address plus an app password (17.5), or the main password if 2FA is off. A user only sees their own domain's book.
+- **Mail apps:** Thunderbird, iPhone/Mac, and Android with DAVx⁵. Outlook desktop has no built-in CardDAV support.
+
+### 17.2 One-click mail app setup
+
+- **Thunderbird:** `https://autoconfig.<domain>/mail/config-v1.1.xml`.
+- **Outlook:** `https://autodiscover.<domain>/autodiscover/autodiscover.xml` (IMAP/SMTP settings), plus an `_autodiscover._tcp.<domain>` SRV record as a fallback.
+- **DNS and certificates:** `autoconfig.`, `autodiscover.` and `mta-sts.` (17.10) are CNAMEs to `MAIL_HOST` and appear in the DNS guidance (§8.5). Once they resolve, the `mailctl-deploy` job `domain_certs` adds them to a per-domain Let's Encrypt certificate via HTTP-01.
+- **Portal setup page:**
+  - an iPhone/Mac `.mobileconfig` profile (IMAP 993 + SMTP 587, no password inside);
+  - a QR code that opens the same download;
+  - the plain settings table (FR-035).
+- **No address probing:** the same answer is returned for any address at a hosted domain, so these endpoints never reveal whether a mailbox exists.
+
+### 17.3 Out-of-office replies
+
+- **Portal form:** on/off, start and end date-time (stored in UTC, entered in the user's time zone), subject, plain-text message up to 4 KB, and the reply interval per sender (default 7 days).
+- **How it runs:** Dovecot Pigeonhole `vacation`, inside the user's generated Sieve script (17.4).
+- **Never replies to:** lists, bulk or auto-generated mail (`Auto-Submitted`, `Precedence: bulk/list/junk`), or `no-reply`-style senders.
+- **Sending:** replies go out from the mailbox address through the normal outbound path, so they are DKIM-signed and rate-limited.
+
+### 17.4 Mail rules
+
+- **Portal rule builder:**
+  - conditions: from, to/cc, subject, or header *contains* / *is*;
+  - actions: move to folder, mark read, flag, move to Trash, stop processing.
+  - Rules are stored in order in `sieve_rules`.
+- **Compiling:** the `mailctl-deploy` job `sieve_compile` writes one script per mailbox (rules + out-of-office) to `/var/vmail/<domain>/<user>/sieve/mailhost.sieve` and compiles it with `sievec`.
+- **Locked down:**
+  - no user-written raw Sieve, and no ManageSieve (port 4190 stays closed);
+  - the `redirect`, `enotify` and `vnd.dovecot.*` extensions are disabled for user scripts.
+  - So rules can never forward mail around the forwarding policy. Forwarding exists only in `forwarding_rules`.
+- **Order:** the global spam-to-Junk script (§6.1) still runs first.
+
+### 17.5 App passwords and two-factor login
+
+- **2FA:** optional authenticator-app codes (TOTP, RFC 6238: 6 digits, 30 s, ±1 step) for portal users and admins.
+  - The secret is stored encrypted with a server key in `totp_secrets`.
+  - Users get 10 single-use recovery codes, stored hashed.
+  - A super-admin can require 2FA for all admins.
+- **Which code at login:** a user with an authenticator app uses its code instead of the emailed code. Password recovery always uses the emailed code (FR-085).
+  - ⚠️ **Deviation from FR-083**, which says the login code is emailed. Needs your approval.
+- **App passwords:**
+  - Stored in `app_passwords`: mailbox, name, Argon2id hash, created, last used, revoked.
+  - Each is 16 random characters in 4 groups, shown once.
+  - Dovecot checks app passwords first (`v_app_auth`), then the main password (`v_auth`).
+- **With 2FA on**, `require_app_passwords` is set: `v_auth` leaves that mailbox out, so the main password no longer works for IMAP/SMTP/CardDAV, and a stolen main password can't read mail.
+- **Revoking** an app password queues `doveadm_kick` for that mailbox.
+
+### 17.6 Login activity and alerts
+
+- **Recorded:** `login_events` holds who, when, service (imap, smtp, portal, admin, dav), result, IP, country, client name and the app password used. Kept 90 days.
+- **Where it comes from:**
+  - `mailhost-status` reads Dovecot and Postfix login lines from journald every minute, using a cursor so no line is read twice.
+  - The portal, admin site and CardDAV write their own events directly.
+- **Country:** from the DB-IP "IP to Country Lite" database (free, CC BY 4.0), refreshed monthly.
+- **Portal:** "Recent activity" shows the last 30 days.
+- **Alerts:** an email to the mailbox and recovery address on the first successful login from a new country, and when an app password is created. At most one alert per hour.
+- **Sign out everywhere:** revokes portal sessions and queues `doveadm_kick`, with an option to also revoke all app passwords.
+
+### 17.7 Personal spam controls
+
+- **Lists:** `spam_sender_lists` holds, per mailbox, allow and block entries, each a full address or `@domain` in lowercase.
+- **How they apply:** the `mailctl-deploy` job `spam_lists` writes Rspamd multimap files keyed by recipient and sender. Rspamd picks up map changes without a restart.
+  - Allow lowers the spam score.
+  - Block adds a high score, so the mail goes to Junk.
+  - Neither ever bypasses virus scanning or a DMARC reject.
+- **Daily digest:** each mailbox with quarantined mail in the last 24 h gets one email listing sender, time, size and reason. There is no subject, the same as `quarantine_items`.
+- **Release requests:** each digest line has a "request release" link (single-use token, 7-day expiry) that creates a `release_requests` row. An admin approves it in the quarantine view, so release stays admin-only (§6.4).
+
+### 17.8 Shared mailboxes
+
+- **Kind:** `mailboxes.kind` is `personal` or `shared`. A CHECK makes sure shared mailboxes have no login password and no recovery email.
+- **Access:** `shared_access` holds the shared mailbox, the member mailbox, `can_read` and `can_send`. Members must be from the same domain.
+- **IMAP:** a Dovecot shared namespace plus the ACL plugin, with rights from the view `v_shared_acl`.
+- **Sending as the shared address:** `v_sender_login` gains a row (shared address → member login) for every `can_send` member.
+- **Delivery:** like any mailbox, because active shared mailboxes are in `v_mailboxes`. They are never in `v_auth`.
+- **Managed by** domain admins (`mailbox.manage`).
+
+### 17.9 Quota warnings
+
+- **Thresholds:** 80%, 90% and 95% (in `settings`).
+- **Warnings:** `mailhost-status` compares `quota_used_bytes` (refreshed every 15 minutes) and emails the user once per threshold. `quota_warned_level` resets when usage drops below 75%.
+- **Portal:** a usage bar and a "Request more space" button. The request goes to `quota_requests` (mailbox, requested MB, note, status), and when an admin approves it the new quota applies.
+
+### 17.10 Domain health checker
+
+- **Checks:** every 6 hours, and on demand, `mailhost-status` checks each active domain:
+  - MX points to `MAIL_HOST`;
+  - SPF covers this server;
+  - the DKIM TXT matches the active key;
+  - DMARC record and policy;
+  - autoconfig/autodiscover CNAMEs;
+  - MTA-STS record and policy file, and TLS-RPT;
+  - the server's PTR matches `MAIL_HOST`.
+- **Results:** stored in `domain_checks` (domain, check, ok/warn/fail, detail, time). The admin view shows red/green with fix instructions.
+- **MTA-STS:** `https://mta-sts.<domain>/.well-known/mta-sts.txt` is served by Nginx. It starts in `testing` mode and an admin switches it to `enforce`. TLS-RPT reports go to `tls-reports@PRIMARY_DOMAIN`.
+- **DMARC reports:**
+  - The DNS guidance sets `rua=mailto:dmarc-reports@PRIMARY_DOMAIN`, plus the `_report._dmarc` authorisation record for other hosted domains.
+  - A timer parses the zipped or gzipped XML into `dmarc_reports` and `dmarc_records` (reporter, period, source IP, count, SPF/DKIM result), kept 180 days.
+  - The admin view shows the pass rate per domain and the top failing senders.
+  - This system mailbox is the only mail whose content the system reads.
+
+### 17.11 Migration from an old provider
+
+- **Migration job:** an admin enters the old IMAP host, port, TLS mode, username and password for a mailbox.
+  - The password is stored encrypted in `migration_jobs` and deleted when the job ends, after 7 days at most.
+  - The `mailctl-deploy` job `imap_migrate` runs `imapsync` into the new mailbox through a Dovecot master user that only this job can use.
+  - The admin sees status and message counts only.
+- **CSV bulk create:**
+  - Columns: address, display name, quota, recovery email.
+  - Every row is checked with the same address rules, then shown as a preview to confirm.
+  - Initial passwords are random, shown once to the admin as a download, and `must_change_password` forces a change at first portal login.
+
+### 17.12 Delivery log search
+
+- **Recorded:** `mailhost-status` reads Postfix log lines (journald cursor) into `delivery_events`, one row per recipient: queue ID, time, sender, recipient, status (sent, deferred, bounced, rejected, held), relay host, DSN code and a short reason. Kept 30 days.
+- **Search:** admins search by sender, recipient, time range and status. Domain admins only see events where the sender or recipient is in one of their domains. The search never shows subject or content.
+
+### 17.13 New pieces at a glance
+
+- **Tables:** `sieve_rules`, `vacation_settings`, `totp_secrets`, `recovery_codes`, `app_passwords`, `login_events`, `spam_sender_lists`, `release_requests`, `shared_access`, `quota_requests`, `domain_checks`, `dmarc_reports`, `dmarc_records`, `migration_jobs`, `delivery_events`.
+- **Mailbox columns:** `display_name`, `job_title`, `department`, `phone`, `directory_visible`, `kind`, `require_app_passwords`, `quota_warned_level`, `must_change_password`.
+- **Views:**
+  - new: `v_directory`, `v_app_auth`, `v_shared_acl`;
+  - updated: `v_auth` (no shared mailboxes; nothing with `require_app_passwords`), `v_mailboxes` (shared mailboxes included), `v_sender_login` (shared senders).
+- **`mailctl-deploy` jobs:** `domain_certs`, `sieve_compile`, `spam_lists`, `imap_migrate`.
+- **Packages:** `php-sabre-dav`, `dovecot-sieve`, `imapsync`, the DB-IP Lite country database.
+
+### 17.14 Things to verify early (additions)
+
+1. **Shared mailbox ACLs:** Dovecot reading shared-mailbox ACLs from SQL. Fallback: `mailctl-deploy` writes `dovecot-acl` files.
+2. **imapsync:** whether it is packaged for Ubuntu 24.04. Fallback: the upstream release.
+3. **Spam lists:** Rspamd multimap per-recipient allow/block with `rcpt` + `from` selectors.
+4. **Outlook autodiscover:** whether the new Outlook still honours it for IMAP accounts. If not, the portal setup page covers it.
+
+### 17.15 Where the additions land in the build order
+
+| Step | Adds |
+|---|---|
+| **1b (new)** | Schema for all additions: migrations 0007+, the new and updated views, grants, tests (shared mailboxes, app-password-only login, directory). Done when migrations apply twice and every view and grant test passes. |
+| 2 | Dovecot app-password passdb, shared namespace + ACL, Pigeonhole with restricted extensions |
+| 3 | Per-user allow/block maps in Rspamd |
+| 4 | Jobs `domain_certs`, `sieve_compile`, `spam_lists`, `imap_migrate`; login and delivery log ingest; GeoIP; quota warnings; domain checks; DMARC parsing; quarantine digest |
+| 5 | Admin: shared mailboxes, directory fields, health and DMARC views, delivery search, CSV import + migration, quota and release approvals, admin 2FA |
+| 7 | Portal: out-of-office, mail rules, app passwords + 2FA, activity + alerts, spam lists + release requests, quota bar + requests, setup page and profile, autoconfig/autodiscover endpoints, CardDAV directory |
+| 8 | Acceptance tests for every addition |
