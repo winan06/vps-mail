@@ -239,6 +239,28 @@ final class GrantsMatrixTest extends DbTestCase
         $this->assertSame(4, (int) $this->pdo->query("SELECT COUNT(*) FROM audit_log WHERE action = 'grants.test'")->fetchColumn());
     }
 
+    public function test_mailctl_database_grant_does_not_reach_sibling_databases(): void
+    {
+        // In a database-level grant "_" matches any one character, so an unescaped
+        // `mailhost_test`.* would also cover a sibling database such as mailhostXtest.
+        $sibling = 'mailhostXtest';
+        $this->pdo->exec("DROP DATABASE IF EXISTS `$sibling`");
+        $this->pdo->exec("CREATE DATABASE `$sibling`");
+
+        try {
+            $this->pdo->exec("CREATE TABLE `$sibling`.secrets (x INT)");
+            $this->pdo->exec("INSERT INTO `$sibling`.secrets VALUES (1)");
+
+            $mailctl = $this->connectAs('mailctl');
+
+            // Control: the database it was provisioned for stays readable.
+            $this->assertInstanceOf(PDOStatement::class, $mailctl->query('SELECT * FROM v_auth'));
+            $this->assertDenied($mailctl, "SELECT * FROM `$sibling`.secrets", [self::TABLE_DENIED]);
+        } finally {
+            $this->pdo->exec("DROP DATABASE IF EXISTS `$sibling`");
+        }
+    }
+
     public function test_reprovision_rotates_password(): void
     {
         $first = bin2hex(random_bytes(16));

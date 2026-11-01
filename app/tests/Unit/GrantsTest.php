@@ -32,21 +32,42 @@ final class GrantsTest extends TestCase
     public function test_no_dangerous_grants(): void
     {
         $wildcards = [];
-        foreach (Grants::USERS as $user) {
-            foreach (Grants::forUser($user, 'mailhost') as $statement) {
-                $this->assertStringStartsWith('GRANT ', $statement);
-                $this->assertStringNotContainsString('*.*', $statement, "$user: $statement");
-                $this->assertStringNotContainsString('ALL PRIVILEGES', $statement, "$user: $statement");
-                $this->assertStringNotContainsString('GRANT OPTION', $statement, "$user: $statement");
-                $this->assertStringNotContainsString(' TO ', $statement, "$user: the TO clause is added per host");
+        foreach (['mailhost', 'mailhost_test'] as $db) {
+            foreach (Grants::USERS as $user) {
+                foreach (Grants::forUser($user, $db) as $statement) {
+                    $this->assertStringStartsWith('GRANT ', $statement);
+                    $this->assertStringNotContainsString('*.*', $statement, "$user: $statement");
+                    $this->assertStringNotContainsString('ALL PRIVILEGES', $statement, "$user: $statement");
+                    $this->assertStringNotContainsString('GRANT OPTION', $statement, "$user: $statement");
+                    $this->assertStringNotContainsString(' TO ', $statement, "$user: the TO clause is added per host");
 
-                if (str_contains($statement, '`.*')) {
-                    $wildcards[] = "$user: $statement";
+                    if (str_contains($statement, '`.*')) {
+                        $wildcards[] = "$user: $statement";
+                    }
                 }
             }
         }
 
-        $this->assertSame(['mailctl: GRANT SELECT ON `mailhost`.*'], $wildcards);
+        // A name without "_" is used as is; "_" is escaped, see test_database_level_grant_escapes_underscores().
+        $this->assertSame([
+            'mailctl: GRANT SELECT ON `mailhost`.*',
+            'mailctl: GRANT SELECT ON `mailhost\_test`.*',
+        ], $wildcards);
+    }
+
+    public function test_database_level_grant_escapes_underscores(): void
+    {
+        // In a database-level grant "_" matches any single character, so an unescaped name would
+        // also cover siblings such as mailhostXtest. Table-level grants take the name literally.
+        $this->assertSame('GRANT SELECT ON `mailhost\_test`.*', Grants::forUser('mailctl', 'mailhost_test')[0]);
+        $this->assertSame('GRANT SELECT ON `a\_b\_c`.*', Grants::forUser('mailctl', 'a_b_c')[0]);
+        $this->assertSame('GRANT SELECT ON `mailhost`.*', Grants::forUser('mailctl', 'mailhost')[0]);
+
+        $this->assertContains('GRANT UPDATE ON `mailhost_test`.`deployments`', Grants::forUser('mailctl', 'mailhost_test'));
+        $this->assertSame(
+            'GRANT SELECT ON `mailhost_test`.`v_auth`',
+            Grants::forUser('mail_ro', 'mailhost_test')[2]
+        );
     }
 
     public function test_mail_ro_reads_exactly_six_views(): void

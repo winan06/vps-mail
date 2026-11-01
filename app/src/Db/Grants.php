@@ -151,8 +151,13 @@ final class Grants
     /** @return list<string> */
     private static function mailctl(string $db): array
     {
+        // In a database-level grant "_" is a wildcard for any one character, so the name must be
+        // escaped or `mail_prod`.* would also cover a sibling database such as mailXprod.
+        // Table-level grants take the name literally and need no escaping.
+        $pattern = str_replace('_', '\\_', $db);
+
         return [
-            "GRANT SELECT ON `$db`.*",
+            "GRANT SELECT ON `$pattern`.*",
             self::grant('UPDATE', $db, 'deployments'),
             self::grant('SELECT, INSERT, UPDATE', $db, 'quarantine_items'),
             self::grant(self::columns('UPDATE', ['quota_used_bytes', 'usage_updated_at']), $db, 'mailboxes'),
