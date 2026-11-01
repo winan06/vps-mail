@@ -436,6 +436,21 @@ final class SchemaTest extends DbTestCase
         ];
     }
 
+    public function test_catch_all_alias_is_rejected(): void
+    {
+        $domainId = $this->domain('example.com');
+
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)',
+            [$domainId, '']
+        );
+        $this->assertNull($this->scalar(
+            "SELECT column_default FROM information_schema.columns WHERE table_schema = DATABASE() "
+            . "AND table_name = 'aliases' AND column_name = 'local_part'"
+        ));
+    }
+
     public function test_hash_columns_accept_lowercase_hex(): void
     {
         $hex = hash('sha256', 'secret');

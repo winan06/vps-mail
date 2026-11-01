@@ -54,7 +54,7 @@ final class MailViewsTest extends DbTestCase
      * - dave: active, forwards to dave@gmail.com and keeps a copy.
      * - erin: active, but her domain other.org is suspended.
      *
-     * Aliases sales@ (alice and dave) and the catch-all @example.com (alice).
+     * Alias sales@ points at alice and dave. There are no catch-all aliases.
      * team@ is a universal list whose members are alice, bob (mailbox suspended),
      * dave (member row suspended) and erin (domain suspended). old@ is a suspended
      * list with alice as a member.
@@ -76,7 +76,6 @@ final class MailViewsTest extends DbTestCase
         $this->erin = $this->mailbox($this->other, 'erin');
 
         $this->alias($this->example, 'sales', ['alice@example.com', 'dave@example.com']);
-        $this->alias($this->example, '', ['alice@example.com']);
 
         $this->team = $this->mailList($this->example, 'team', 'universal');
         $this->member($this->team, $this->alice);
@@ -140,6 +139,17 @@ final class MailViewsTest extends DbTestCase
 
             $this->assertSame($columns, $actual, $view);
         }
+    }
+
+    public function test_every_text_column_is_ascii_bin(): void
+    {
+        $rows = $this->pdo->query(
+            "SELECT CONCAT(table_name, '.', column_name, ' ', collation_name) FROM information_schema.columns "
+            . "WHERE table_schema = DATABASE() AND table_name LIKE 'v\\_%' AND collation_name IS NOT NULL "
+            . "AND collation_name <> 'ascii_bin'"
+        )->fetchAll(PDO::FETCH_COLUMN);
+
+        $this->assertSame([], $rows);
     }
 
     public function test_migration_can_be_run_again(): void
@@ -225,10 +235,9 @@ final class MailViewsTest extends DbTestCase
         $this->assertSame(['alice@example.com', 'dave@example.com'], $this->destinations('sales@example.com'));
     }
 
-    public function test_catch_all_does_not_swallow_mailboxes(): void
+    public function test_mailbox_without_forwarding_maps_to_itself(): void
     {
         $this->assertSame(['alice@example.com'], $this->destinations('alice@example.com'));
-        $this->assertSame(['alice@example.com'], $this->destinations('@example.com'));
     }
 
     public function test_forwarding_without_copy(): void
@@ -242,6 +251,29 @@ final class MailViewsTest extends DbTestCase
             ['dave@example.com', 'dave@gmail.com'],
             $this->destinations('dave@example.com')
         );
+    }
+
+    public function test_alias_to_suspended_mailbox_does_not_reach_another_user(): void
+    {
+        $this->alias($this->example, 'help', ['bob@example.com']);
+
+        // help@ still maps to bob, who is not a mailbox Dovecot knows, so delivery bounces.
+        $this->assertSame(['bob@example.com'], $this->destinations('help@example.com'));
+        $this->assertSame(['help@example.com'], $this->destinations('help@example.net'));
+        $this->assertSame([], $this->col("SELECT email FROM v_mailboxes WHERE email = 'bob@example.com'"));
+
+        // Postfix looks bob@ up again after expanding help@; that must find nothing, and no
+        // row anywhere may send mail meant for bob or help to another user.
+        $this->assertSame([], $this->destinations('bob@example.com'));
+        $this->assertSame([], $this->destinations('bob@example.net'));
+        $this->assertSame(
+            [],
+            $this->col(
+                "SELECT destination FROM v_aliases WHERE source LIKE 'help@%' AND destination = 'alice@example.com'"
+            )
+        );
+        $this->assertSame([], $this->col("SELECT source FROM v_aliases WHERE source LIKE '@%'"));
+        $this->assertSame([], $this->logins('help@example.com'));
     }
 
     public function test_suspended_mailbox_has_no_alias_rows(): void
@@ -273,11 +305,6 @@ final class MailViewsTest extends DbTestCase
         );
     }
 
-    public function test_alias_domain_has_no_catch_all(): void
-    {
-        $this->assertSame([], $this->col("SELECT source FROM v_aliases WHERE source = '@example.net'"));
-    }
-
     public function test_aliases_view_is_complete(): void
     {
         $rows = $this->pdo->query(
@@ -286,7 +313,6 @@ final class MailViewsTest extends DbTestCase
         sort($rows, SORT_STRING);
 
         $this->assertSame([
-            '@example.com > alice@example.com',
             'alice@example.com > alice@example.com',
             'alice@example.net > alice@example.com',
             'carol@example.com > carol@gmail.com',
@@ -350,17 +376,9 @@ final class MailViewsTest extends DbTestCase
         $this->assertSame([], $this->logins('sales@example.com'));
     }
 
-    public function test_inactive_catch_all_is_ignored(): void
-    {
-        $this->exec("UPDATE aliases SET active = 0 WHERE local_part = ''");
-
-        $this->assertSame([], $this->destinations('@example.com'));
-    }
-
     public function test_alias_on_a_suspended_domain_is_ignored(): void
     {
         $this->alias($this->other, 'info', ['erin@other.org']);
-        $this->alias($this->other, '', ['erin@other.org']);
 
         $this->assertSame([], $this->col("SELECT source FROM v_aliases WHERE source LIKE '%@other.org'"));
         $this->assertSame([], $this->col("SELECT sender FROM v_sender_login WHERE sender LIKE '%@other.org'"));
@@ -409,7 +427,6 @@ final class MailViewsTest extends DbTestCase
         $this->assertSame(['alice@example.com'], $this->logins('alice@example.com'));
         $this->assertSame(['alice@example.com', 'dave@example.com'], $this->logins('sales@example.com'));
         $this->assertSame([], $this->col("SELECT login FROM v_sender_login WHERE sender LIKE 'bob@%'"));
-        $this->assertSame([], $this->col("SELECT login FROM v_sender_login WHERE sender = '@example.com'"));
     }
 
     public function test_v_sender_login_is_complete(): void
@@ -647,17 +664,6 @@ final class MailViewsTest extends DbTestCase
         $this->mailList($this->example, 'quiet', 'domain', 'suspended');
 
         $this->assertContains('quiet@example.com list_inactive', $this->rejected());
-    }
-
-    public function test_catch_all_alias_is_never_rejected(): void
-    {
-        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
-
-        $this->exec("UPDATE aliases SET active = 0 WHERE local_part = ''");
-        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
-
-        $this->exec("DELETE FROM alias_targets WHERE alias_id IN (SELECT id FROM aliases WHERE local_part = '')");
-        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
     }
 
     public function test_alias_domain_of_a_suspended_domain_is_not_rejected(): void

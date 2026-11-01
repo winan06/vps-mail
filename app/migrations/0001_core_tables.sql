@@ -73,16 +73,18 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     CONSTRAINT chk_mailboxes_recovery_email_lc CHECK (recovery_email = LOWER(recovery_email))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- An empty local_part is the catch-all alias of the domain.
+-- local_part is never empty: version 1 has no catch-all aliases, because a catch-all
+-- would receive the mail of every address that is suspended, deleted or mistyped.
 CREATE TABLE IF NOT EXISTS aliases (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     domain_id INT UNSIGNED NOT NULL,
-    local_part VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+    local_part VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     active BOOL NOT NULL DEFAULT 1,
     PRIMARY KEY (id),
     UNIQUE KEY uq_aliases_domain_local_part (domain_id, local_part),
     CONSTRAINT fk_aliases_domain FOREIGN KEY (domain_id) REFERENCES domains (id) ON DELETE CASCADE,
-    CONSTRAINT chk_aliases_local_part_lc CHECK (local_part = LOWER(local_part))
+    CONSTRAINT chk_aliases_local_part_lc CHECK (local_part = LOWER(local_part)),
+    CONSTRAINT chk_aliases_local_part_not_empty CHECK (local_part <> '')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS alias_targets (

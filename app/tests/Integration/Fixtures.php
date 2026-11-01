@@ -47,7 +47,7 @@ trait Fixtures
     }
 
     /**
-     * An active alias with one target row per destination. An empty $lp is the catch-all.
+     * An active alias with one target row per destination. $lp must not be empty.
      *
      * @param list<string> $destinations
      */
