@@ -528,7 +528,7 @@ final class SchemaTest extends DbTestCase
         $this->assertSame(7, (int) $this->scalar('SELECT COUNT(*) FROM settings'));
         $this->assertSame(1, (int) $this->scalar('SELECT COUNT(*) FROM filter_global'));
         $this->assertSame(
-            ['0001_core_tables', '0002_lists', '0003_rbac', '0004_ops'],
+            ['0001_core_tables', '0002_lists', '0003_rbac', '0004_ops', '0005_mail_views'],
             $this->pdo->query('SELECT version FROM schema_migrations ORDER BY version')->fetchAll(PDO::FETCH_COLUMN)
         );
     }
