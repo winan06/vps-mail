@@ -7,6 +7,11 @@
 --     effect on the very next lookup, with no reload.
 --   * Addresses are built as local_part + '@' + domain name. Local parts are never empty
 --     (0001 forbids catch-all aliases), so every address names one real recipient.
+--   * A real domain always beats an alias domain of the same name, whatever the real
+--     domain's status: every branch that reads domain_aliases carries
+--     NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain). Otherwise listing
+--     b.com as an alias of example.com while b.com is also hosted would copy or reject
+--     b.com's mail on behalf of example.com's users.
 --   * Every text column is ascii_bin, like the identifier columns of the base tables.
 --   * Safe to re-run: CREATE OR REPLACE VIEW. Views are listed in dependency order,
 --     so v_local_addresses comes before v_aliases, which reads it.
@@ -31,7 +36,8 @@ FROM lists l
 JOIN domains d ON d.id = l.domain_id
 WHERE l.status = 'active' AND d.status = 'active';
 
--- Domains Postfix accepts mail for: active domains plus the alias domains of active domains.
+-- Domains Postfix accepts mail for: active domains plus the alias domains of active domains
+-- (an alias domain that is also a real domain is that real domain, see above).
 CREATE OR REPLACE VIEW v_domains AS
 SELECT d.name AS name
 FROM domains d
@@ -40,7 +46,8 @@ UNION
 SELECT da.alias_domain
 FROM domain_aliases da
 JOIN domains d ON d.id = da.target_domain_id
-WHERE d.status = 'active';
+WHERE d.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain);
 
 CREATE OR REPLACE VIEW v_mailboxes AS
 SELECT
@@ -76,6 +83,7 @@ WHERE m.status = 'active' AND d.status = 'active';
 --      active (so the member's own domain is active too);
 --   e. alias domains: lp@alias_domain to lp@target for every local address of an
 --      active target domain, so unknown addresses at an alias domain are still rejected.
+--      Not for an alias domain that is also a real domain.
 CREATE OR REPLACE VIEW v_aliases AS
 SELECT
     CONCAT(a.local_part, '@', d.name) AS source,
@@ -128,7 +136,8 @@ SELECT
 FROM domain_aliases da
 JOIN domains td ON td.id = da.target_domain_id
 JOIN v_local_addresses la ON la.domain_id = td.id
-WHERE td.status = 'active';
+WHERE td.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain);
 
 -- Postfix smtpd_sender_login_maps: sender address to the logins allowed to use it.
 -- An active mailbox may send as itself. An active alias address may be used by each of
@@ -215,7 +224,8 @@ GROUP BY r.domain_id, r.local_part;
 
 -- The rejected addresses as full emails, one row per email: the rows of v_rejected_local,
 -- plus lp@alias_domain for each of them whose domain is the target of an alias domain
--- (the target domain must be active, as v_domains requires for the alias domain to work).
+-- (the target domain must be active, as v_domains requires for the alias domain to work,
+-- and the alias domain must not also be a real domain).
 CREATE OR REPLACE VIEW v_rejected_recipients AS
 SELECT u.email AS email, MIN(u.reason) AS reason
 FROM (
@@ -229,5 +239,6 @@ FROM (
     JOIN domains td ON td.id = da.target_domain_id
     JOIN v_rejected_local r ON r.domain_id = td.id
     WHERE td.status = 'active'
+      AND NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain)
 ) u
 GROUP BY u.email;

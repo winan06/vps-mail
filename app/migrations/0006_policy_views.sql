@@ -13,6 +13,12 @@
 -- Active lists of active domains, with the size limit that applies to each. A list
 -- without a limit of its own gets the global max_message_mb setting converted to KB;
 -- it is NULL only if that setting row has been deleted.
+--
+-- Each list appears once per spelling Postfix delivers to it: lp@domain, and lp@alias_domain
+-- for every alias domain of its domain (v_aliases in 0005 maps the latter to the former).
+-- Without the alias spellings, mail to all@example.net would reach all@example.com's members
+-- while the policy service saw "not a list" and skipped the sender rules. As in 0005, an
+-- alias domain that is also a real domain is that real domain, and contributes no row.
 CREATE OR REPLACE VIEW v_lists AS
 SELECT
     CONCAT(l.local_part, '@', d.name) AS address,
@@ -24,9 +30,24 @@ SELECT
     ) AS max_message_kb
 FROM lists l
 JOIN domains d ON d.id = l.domain_id
-WHERE l.status = 'active' AND d.status = 'active';
+WHERE l.status = 'active' AND d.status = 'active'
+UNION ALL
+SELECT
+    CONCAT(l.local_part, '@', da.alias_domain),
+    l.id,
+    l.scope,
+    COALESCE(
+        l.max_message_kb,
+        (SELECT CAST(s.value AS UNSIGNED) * 1024 FROM settings s WHERE s.`key` = 'max_message_mb')
+    )
+FROM lists l
+JOIN domains d ON d.id = l.domain_id
+JOIN domain_aliases da ON da.target_domain_id = d.id
+WHERE l.status = 'active' AND d.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM domains x WHERE x.name = da.alias_domain);
 
--- Who may post to each list in v_lists. value is empty for any_authenticated.
+-- Who may post to each list in v_lists, under every address of the list. value is empty
+-- for any_authenticated.
 CREATE OR REPLACE VIEW v_list_sender_rules AS
 SELECT
     vl.address AS address,

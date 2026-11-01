@@ -305,6 +305,54 @@ final class MailViewsTest extends DbTestCase
         );
     }
 
+    // ---- an alias domain with the name of a real domain --------------------------
+
+    /**
+     * b.com is a real domain and also listed as an alias of example.com. The real domain wins:
+     * mail for b.com must never be copied or routed into example.com.
+     */
+    public function test_real_domain_beats_an_alias_domain_of_the_same_name(): void
+    {
+        $b = $this->domain('b.com');
+        $this->mailbox($b, 'bob');
+        $this->aliasDomain('b.com', $this->example);
+        // Give example.com a live bob too, so an alias-domain row bob@b.com > bob@example.com could exist.
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['active', $this->bob]);
+
+        $this->assertSame(['b.com', 'example.com', 'example.net'], $this->col('SELECT name FROM v_domains'));
+        $this->assertSame(['bob@b.com'], $this->destinations('bob@b.com'));
+        $this->assertSame([], $this->destinations('alice@b.com'));
+        $this->assertSame(
+            ['bob@b.com > bob@b.com'],
+            $this->col("SELECT CONCAT(source, ' > ', destination) FROM v_aliases WHERE source LIKE '%@b.com'")
+        );
+    }
+
+    public function test_rejections_of_the_target_never_reach_a_real_domain_of_the_same_name(): void
+    {
+        $b = $this->domain('b.com');
+        $this->mailbox($b, 'alice');
+        $this->mailbox($b, 'bob');
+        $this->aliasDomain('b.com', $this->example);
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['suspended', $this->alice]);
+
+        // alice and bob are suspended at example.com, but their b.com namesakes are live mailboxes.
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '%@b.com'"));
+        $this->assertContains('alice@example.com mailbox_inactive', $this->rejected());
+        $this->assertContains('alice@example.net mailbox_inactive', $this->rejected());
+    }
+
+    public function test_suspended_real_domain_still_beats_an_alias_domain_of_the_same_name(): void
+    {
+        $b = $this->domain('b.com', 'suspended');
+        $this->mailbox($b, 'bob');
+        $this->aliasDomain('b.com', $this->example);
+
+        $this->assertSame(['example.com', 'example.net'], $this->col('SELECT name FROM v_domains'));
+        $this->assertSame([], $this->col("SELECT source FROM v_aliases WHERE source LIKE '%@b.com'"));
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '%@b.com'"));
+    }
+
     public function test_aliases_view_is_complete(): void
     {
         $rows = $this->pdo()->query(

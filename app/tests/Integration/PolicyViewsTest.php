@@ -47,7 +47,8 @@ final class PolicyViewsTest extends DbTestCase
     }
 
     /**
-     * example.com is active and other.org is suspended.
+     * example.com is active and other.org is suspended. example.net is an alias domain of
+     * example.com and other.net one of other.org.
      *
      * - alice and carol: active mailboxes. bob: suspended. erin: active, but on other.org.
      * - team@: active universal list, no size limit of its own.
@@ -63,6 +64,8 @@ final class PolicyViewsTest extends DbTestCase
     {
         $this->example = $this->domain('example.com');
         $this->other = $this->domain('other.org', 'suspended');
+        $this->aliasDomain('example.net', $this->example);
+        $this->aliasDomain('other.net', $this->other);
 
         $this->alice = $this->mailbox($this->example, 'alice');
         $this->bob = $this->mailbox($this->example, 'bob', 'suspended');
@@ -225,7 +228,15 @@ final class PolicyViewsTest extends DbTestCase
             $this->pdo()->exec($statement);
         }
 
-        $this->assertSame(['big@example.com domain 512', 'team@example.com universal 25600'], $this->lists());
+        $this->assertSame(
+            [
+                'big@example.com domain 512',
+                'big@example.net domain 512',
+                'team@example.com universal 25600',
+                'team@example.net universal 25600',
+            ],
+            $this->lists()
+        );
     }
 
     // ---- v_lists -----------------------------------------------------------------
@@ -233,8 +244,17 @@ final class PolicyViewsTest extends DbTestCase
     public function test_v_lists_limits(): void
     {
         // team has no limit of its own and takes max_message_mb (25) * 1024; big keeps its 512.
-        // old (suspended list) and gone (list on a suspended domain) are absent.
-        $this->assertSame(['big@example.com domain 512', 'team@example.com universal 25600'], $this->lists());
+        // old (suspended list) and gone (list on a suspended domain) are absent. Each list also
+        // appears under the alias domain example.net.
+        $this->assertSame(
+            [
+                'big@example.com domain 512',
+                'big@example.net domain 512',
+                'team@example.com universal 25600',
+                'team@example.net universal 25600',
+            ],
+            $this->lists()
+        );
     }
 
     public function test_v_lists_gives_the_list_id(): void
@@ -249,25 +269,48 @@ final class PolicyViewsTest extends DbTestCase
     {
         $this->exec("UPDATE settings SET value = '50' WHERE `key` = 'max_message_mb'");
 
-        $this->assertSame(['big@example.com domain 512', 'team@example.com universal 51200'], $this->lists());
+        $this->assertSame(
+            [
+                'big@example.com domain 512',
+                'big@example.net domain 512',
+                'team@example.com universal 51200',
+                'team@example.net universal 51200',
+            ],
+            $this->lists()
+        );
     }
 
     public function test_v_lists_own_limit_beats_the_setting(): void
     {
         $this->exec('UPDATE lists SET max_message_kb = 40000 WHERE id = ?', [$this->big]);
 
-        $this->assertSame(['big@example.com domain 40000', 'team@example.com universal 25600'], $this->lists());
+        $this->assertSame(
+            [
+                'big@example.com domain 40000',
+                'big@example.net domain 40000',
+                'team@example.com universal 25600',
+                'team@example.net universal 25600',
+            ],
+            $this->lists()
+        );
     }
 
     public function test_v_lists_list_suspension_is_immediate(): void
     {
         $this->exec("UPDATE lists SET status = 'suspended' WHERE id = ?", [$this->team]);
-        $this->assertSame(['big@example.com domain 512'], $this->lists());
+        $this->assertSame(['big@example.com domain 512', 'big@example.net domain 512'], $this->lists());
 
         $this->exec("UPDATE lists SET status = 'active' WHERE id = ?", [$this->old]);
         $this->exec("UPDATE lists SET status = 'active' WHERE id = ?", [$this->team]);
         $this->assertSame(
-            ['big@example.com domain 512', 'old@example.com domain 25600', 'team@example.com universal 25600'],
+            [
+                'big@example.com domain 512',
+                'big@example.net domain 512',
+                'old@example.com domain 25600',
+                'old@example.net domain 25600',
+                'team@example.com universal 25600',
+                'team@example.net universal 25600',
+            ],
             $this->lists()
         );
     }
@@ -282,9 +325,45 @@ final class PolicyViewsTest extends DbTestCase
         $this->exec("UPDATE domains SET status = 'active' WHERE id = ?", [$this->example]);
         $this->exec("UPDATE domains SET status = 'active' WHERE id = ?", [$this->other]);
         $this->assertSame(
-            ['big@example.com domain 512', 'gone@other.org domain 25600', 'team@example.com universal 25600'],
+            [
+                'big@example.com domain 512',
+                'big@example.net domain 512',
+                'gone@other.net domain 25600',
+                'gone@other.org domain 25600',
+                'team@example.com universal 25600',
+                'team@example.net universal 25600',
+            ],
             $this->lists()
         );
+    }
+
+    /**
+     * Mail to team@example.net reaches team@example.com's members (v_aliases maps it there), so
+     * the policy service must find it as the same list, or anyone could bypass the sender rules
+     * by writing to the alias-domain spelling.
+     */
+    public function test_v_lists_has_the_alias_domain_spelling_of_each_list(): void
+    {
+        $sql = 'SELECT list_id FROM v_lists WHERE address = ?';
+
+        $this->assertSame($this->team, (int) $this->scalar($sql, ['team@example.net']));
+        $this->assertSame($this->big, (int) $this->scalar($sql, ['big@example.net']));
+    }
+
+    public function test_alias_domain_of_a_suspended_domain_has_no_lists(): void
+    {
+        $this->assertSame([], $this->col("SELECT address FROM v_lists WHERE address LIKE '%@other.%'"));
+        $this->assertSame([], $this->col("SELECT address FROM v_list_sender_rules WHERE address LIKE '%@other.%'"));
+    }
+
+    /** An alias domain that is also a real domain is that real domain (see v_domains in 0005). */
+    public function test_alias_domain_named_like_a_real_domain_has_no_list_rows(): void
+    {
+        $this->domain('b.com');
+        $this->aliasDomain('b.com', $this->example);
+
+        $this->assertSame([], $this->col("SELECT address FROM v_lists WHERE address LIKE '%@b.com'"));
+        $this->assertSame([], $this->col("SELECT address FROM v_list_sender_rules WHERE address LIKE '%@b.com'"));
     }
 
     // ---- v_list_sender_rules -----------------------------------------------------
@@ -302,28 +381,46 @@ final class PolicyViewsTest extends DbTestCase
 
     public function test_v_list_sender_rules_only_cover_the_lists_of_v_lists(): void
     {
-        // Rules of old@ (suspended list) and gone@other.org (suspended domain) are absent.
+        // Rules of old@ (suspended list) and gone@other.org (suspended domain) are absent. The
+        // alias-domain spelling of each list carries the same rules.
         $this->assertSame(
             [
                 'big@example.com|address|bob@example.com',
+                'big@example.net|address|bob@example.com',
                 'team@example.com|any_authenticated|',
                 'team@example.com|domain|example.com',
+                'team@example.net|any_authenticated|',
+                'team@example.net|domain|example.com',
             ],
             $this->rules()
+        );
+    }
+
+    public function test_v_list_sender_rules_cover_the_alias_domain_spelling(): void
+    {
+        $this->assertSame(
+            ['any_authenticated|', 'domain|example.com'],
+            $this->col(
+                "SELECT CONCAT(rule_type, '|', value) FROM v_list_sender_rules WHERE address = ?",
+                ['team@example.net']
+            )
         );
     }
 
     public function test_v_list_sender_rules_follow_list_and_domain_status(): void
     {
         $this->exec("UPDATE lists SET status = 'suspended' WHERE id = ?", [$this->team]);
-        $this->assertSame(['big@example.com|address|bob@example.com'], $this->rules());
+        $this->assertSame(
+            ['big@example.com|address|bob@example.com', 'big@example.net|address|bob@example.com'],
+            $this->rules()
+        );
 
         $this->exec("UPDATE lists SET status = 'active' WHERE id = ?", [$this->team]);
         $this->exec("UPDATE domains SET status = 'suspended' WHERE id = ?", [$this->example]);
         $this->assertSame([], $this->rules());
 
         $this->exec("UPDATE domains SET status = 'active' WHERE id = ?", [$this->example]);
-        $this->assertCount(3, $this->rules());
+        $this->assertCount(6, $this->rules());
     }
 
     // ---- v_login_roles -----------------------------------------------------------
