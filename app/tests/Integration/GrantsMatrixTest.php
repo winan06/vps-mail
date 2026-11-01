@@ -298,14 +298,21 @@ final class GrantsMatrixTest extends DbTestCase
             'ip' => "'198.51.100.1'",
             'user_agent' => "'x'",
         ] as $column => $value) {
-            $this->assertDenied($portal, "UPDATE v_portal_sessions SET $column = $value WHERE token_hash = '$mine'", [self::COLUMN_DENIED]);
+            $this->assertDenied(
+                $portal,
+                "UPDATE v_portal_sessions SET $column = $value WHERE token_hash = '$mine'",
+                [self::COLUMN_DENIED]
+            );
         }
 
         $this->assertSame(1, $portal->exec('DELETE FROM v_portal_sessions'));
 
         $this->assertSame(
             ["$admin admin not-revoked"],
-            $this->col("SELECT CONCAT(token_hash, ' ', subject_type, ' ', IF(revoked_at IS NULL, 'not-revoked', 'revoked')) FROM sessions")
+            $this->col(
+                "SELECT CONCAT(token_hash, ' ', subject_type, ' ', IF(revoked_at IS NULL, 'not-revoked', 'revoked')) "
+                . 'FROM sessions'
+            )
         );
     }
 
@@ -351,7 +358,10 @@ final class GrantsMatrixTest extends DbTestCase
             ["$id mailbox new@example.org"],
             $portal->query("SELECT CONCAT(id, ' ', subject_type, ' ', target) FROM v_portal_otp_codes")->fetchAll(PDO::FETCH_COLUMN)
         );
-        $this->assertSame(1, $portal->exec("UPDATE v_portal_otp_codes SET attempts = attempts + 1, used_at = '2029-06-01 00:00:00' WHERE id = $id"));
+        $this->assertSame(
+            1,
+            $portal->exec("UPDATE v_portal_otp_codes SET attempts = attempts + 1, used_at = '2029-06-01 00:00:00' WHERE id = $id")
+        );
 
         foreach ([
             'subject_type' => "'admin'",

@@ -315,12 +315,22 @@ final class SchemaTest extends DbTestCase
         $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 16, 10, 15], 'chk_filter_policies_scores_ordered');
         $this->assertSqlError(self::CHECK_FAILED, $insert, [$other, 6, 16, 15], 'chk_filter_policies_scores_ordered');
         $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET tag_score = 16', [], 'chk_filter_global_scores_ordered');
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET quarantine_score = 16', [], 'chk_filter_global_scores_ordered');
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'UPDATE filter_global SET quarantine_score = 16',
+            [],
+            'chk_filter_global_scores_ordered'
+        );
         $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_policies SET tag_score = 16', [], 'chk_filter_policies_scores_ordered');
 
         // Equal thresholds are allowed, and the global bounds must be ordered.
         $this->query($insert, [$other, 8, 8, 8]);
-        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE filter_global SET bound_min_score = 26', [], 'chk_filter_global_bounds_ordered');
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'UPDATE filter_global SET bound_min_score = 26',
+            [],
+            'chk_filter_global_bounds_ordered'
+        );
     }
 
     public function test_sender_rule_value_rules(): void
@@ -378,6 +388,7 @@ final class SchemaTest extends DbTestCase
             . "VALUES ($mailbox, ?, 'admin', 1)";
         $insertList = "INSERT INTO lists (domain_id, local_part, scope) VALUES ($domain, ?, 'domain')";
         $insertRule = "INSERT INTO list_sender_rules (list_id, rule_type, value) VALUES ($list, ?, ?)";
+        $ruleFormat = 'chk_list_sender_rules_value_format';
         $insertOtpTarget = 'INSERT INTO otp_codes (subject_type, subject_id, purpose, code_hmac, target, expires_at, request_ip) '
             . "VALUES ('mailbox', 1, 'verify_email', REPEAT('a', 64), ?, UTC_TIMESTAMP(), '127.0.0.1')";
 
@@ -415,16 +426,12 @@ final class SchemaTest extends DbTestCase
             'list local part empty' => [$insertList, [''], 'chk_lists_local_part_not_empty'],
             'list local part in uppercase' => [$insertList, ['Staff2'], 'chk_lists_local_part_lc'],
             'list sender rule value in uppercase' => [$insertRule, ['address', 'Boss@example.com'], 'chk_list_sender_rules_value_lc'],
-            'list sender rule address with a comma' => [
-                $insertRule,
-                ['address', 'boss@example.com,all@example.com'],
-                'chk_list_sender_rules_value_format',
-            ],
-            'list sender rule address that is a domain' => [$insertRule, ['address', 'example.com'], 'chk_list_sender_rules_value_format'],
-            'list sender rule domain that is an address' => [$insertRule, ['domain', 'boss@example.com'], 'chk_list_sender_rules_value_format'],
-            'list sender rule domain with one label' => [$insertRule, ['domain', 'localhost'], 'chk_list_sender_rules_value_format'],
-            'list sender rule role with a space' => [$insertRule, ['role', 'super admin'], 'chk_list_sender_rules_value_format'],
-            'list sender rule role with a trailing newline' => [$insertRule, ['role', "super_admin\n"], 'chk_list_sender_rules_value_format'],
+            'list sender rule address with a comma' => [$insertRule, ['address', 'boss@example.com,all@example.com'], $ruleFormat],
+            'list sender rule address that is a domain' => [$insertRule, ['address', 'example.com'], $ruleFormat],
+            'list sender rule domain that is an address' => [$insertRule, ['domain', 'boss@example.com'], $ruleFormat],
+            'list sender rule domain with one label' => [$insertRule, ['domain', 'localhost'], $ruleFormat],
+            'list sender rule role with a space' => [$insertRule, ['role', 'super admin'], $ruleFormat],
+            'list sender rule role with a trailing newline' => [$insertRule, ['role', "super_admin\n"], $ruleFormat],
             'admin username too short' => [$admin, ['ab', 'ab@example.com', self::HASH_ARGON], 'chk_admins_username_format'],
             'admin username in uppercase' => [$admin, ['Admin1', 'admin1@example.com', self::HASH_ARGON], 'chk_admins_username_format'],
             'admin username with a trailing newline' => [
@@ -514,7 +521,10 @@ final class SchemaTest extends DbTestCase
         $mailbox = $this->mailbox($domainId, 'first.last+tag_x-1');
         $this->query('UPDATE mailboxes SET recovery_email = ? WHERE id = ?', ['me+recovery@mail-1.sub.example.co', $mailbox]);
         $alias = $this->insertId('INSERT INTO aliases (domain_id, local_part) VALUES (?, ?)', [$domainId, 'no-reply']);
-        $this->query('INSERT INTO alias_targets (alias_id, destination) VALUES (?, ?)', [$alias, 'first.last+tag_x-1@xn--bcher-kva.example']);
+        $this->query(
+            'INSERT INTO alias_targets (alias_id, destination) VALUES (?, ?)',
+            [$alias, 'first.last+tag_x-1@xn--bcher-kva.example']
+        );
         $this->query(
             'INSERT INTO forwarding_rules (mailbox_id, destination, created_by_type, created_by_id) VALUES (?, ?, ?, ?)',
             [$mailbox, 'a_b@x1.io', 'mailbox', $mailbox]
