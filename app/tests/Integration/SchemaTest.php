@@ -528,8 +528,28 @@ final class SchemaTest extends DbTestCase
         $this->assertSame(7, (int) $this->scalar('SELECT COUNT(*) FROM settings'));
         $this->assertSame(1, (int) $this->scalar('SELECT COUNT(*) FROM filter_global'));
         $this->assertSame(
-            ['0001_core_tables', '0002_lists', '0003_rbac', '0004_ops', '0005_mail_views'],
+            $this->migrationVersionsOnDisk(),
             $this->pdo->query('SELECT version FROM schema_migrations ORDER BY version')->fetchAll(PDO::FETCH_COLUMN)
         );
+    }
+
+    /**
+     * Versions of app/migrations/NNNN_name.sql, the pattern the Migrator accepts, so
+     * adding a migration does not need an edit here.
+     *
+     * @return list<string>
+     */
+    private function migrationVersionsOnDisk(): array
+    {
+        $versions = [];
+        foreach (glob(dirname(__DIR__, 2) . '/migrations/*.sql') ?: [] as $file) {
+            if (preg_match('/^(\\d{4}_[a-z0-9_]+)\\.sql$/', basename($file), $match) === 1) {
+                $versions[] = $match[1];
+            }
+        }
+        sort($versions, SORT_STRING);
+        $this->assertNotSame([], $versions, 'no migration files found');
+
+        return $versions;
     }
 }

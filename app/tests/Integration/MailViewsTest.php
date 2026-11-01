@@ -101,6 +101,16 @@ final class MailViewsTest extends DbTestCase
         return $this->col('SELECT login FROM v_sender_login WHERE sender = ?', [$sender]);
     }
 
+    /**
+     * The whole v_rejected_recipients view as sorted 'email reason' strings.
+     *
+     * @return list<string>
+     */
+    private function rejected(): array
+    {
+        return $this->col("SELECT CONCAT(email, ' ', reason) FROM v_rejected_recipients");
+    }
+
     /** @param list<mixed> $params */
     private function exec(string $sql, array $params = []): void
     {
@@ -118,6 +128,8 @@ final class MailViewsTest extends DbTestCase
             'v_auth' => ['email', 'password'],
             'v_aliases' => ['source', 'destination'],
             'v_sender_login' => ['sender', 'login'],
+            'v_rejected_local' => ['domain_id', 'local_part', 'reason'],
+            'v_rejected_recipients' => ['email', 'reason'],
         ];
 
         foreach ($expected as $view => $columns) {
@@ -518,5 +530,189 @@ final class MailViewsTest extends DbTestCase
             ['alice'],
             $this->col("SELECT local_part FROM v_local_addresses WHERE local_part = 'alice'")
         );
+    }
+
+    // ---- v_rejected_recipients ---------------------------------------------------
+
+    public function test_v_rejected_recipients(): void
+    {
+        // Only bob (suspended mailbox) and old (suspended list), each also at example.net.
+        // Nothing for other.org or other.net (suspended domain), and no row for the
+        // addresses that deliver: alice, carol, dave, sales and team.
+        $this->assertSame(
+            ['bob@example.com', 'bob@example.net', 'old@example.com', 'old@example.net'],
+            $this->col('SELECT email FROM v_rejected_recipients')
+        );
+        $this->assertSame(
+            [
+                'bob@example.com mailbox_inactive',
+                'bob@example.net mailbox_inactive',
+                'old@example.com list_inactive',
+                'old@example.net list_inactive',
+            ],
+            $this->rejected()
+        );
+    }
+
+    public function test_rejected_recipients_never_have_alias_rows(): void
+    {
+        $overlap = $this->pdo->query(
+            'SELECT COUNT(*) FROM v_rejected_recipients r JOIN v_aliases a ON a.source = r.email'
+        )->fetchColumn();
+
+        $this->assertSame(0, (int) $overlap);
+    }
+
+    public function test_rejected_recipients_leave_out_a_suspended_domain(): void
+    {
+        $this->mailbox($this->other, 'frank', 'suspended');
+        $this->alias($this->other, 'info', []);
+        $this->mailList($this->other, 'news', 'domain', 'suspended');
+
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '%@other.%'"));
+
+        $this->exec('UPDATE domains SET status = ? WHERE id = ?', ['suspended', $this->example]);
+        $this->assertSame([], $this->rejected());
+    }
+
+    public function test_deleting_mailbox_is_rejected(): void
+    {
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['deleting', $this->dave]);
+
+        $this->assertContains('dave@example.com mailbox_inactive', $this->rejected());
+        $this->assertContains('dave@example.net mailbox_inactive', $this->rejected());
+    }
+
+    public function test_alias_without_targets_is_rejected(): void
+    {
+        $this->alias($this->example, 'nobody', []);
+
+        $this->assertSame(
+            ['nobody@example.com alias_empty', 'nobody@example.net alias_empty'],
+            array_values(array_filter($this->rejected(), static fn (string $r): bool => str_starts_with($r, 'nobody@')))
+        );
+    }
+
+    public function test_disabled_alias_is_rejected(): void
+    {
+        $this->exec("UPDATE aliases SET active = 0 WHERE local_part = 'sales'");
+
+        $rows = array_values(array_filter($this->rejected(), static fn (string $r): bool => str_starts_with($r, 'sales@')));
+        $this->assertSame(['sales@example.com alias_inactive', 'sales@example.net alias_inactive'], $rows);
+    }
+
+    public function test_disabled_alias_without_targets_gets_one_row(): void
+    {
+        $id = $this->alias($this->example, 'ghost', []);
+        $this->exec('UPDATE aliases SET active = 0 WHERE id = ?', [$id]);
+
+        $this->assertSame(
+            ['ghost@example.com'],
+            $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE 'ghost@%.com'")
+        );
+        $this->assertSame(
+            ['alias_inactive'],
+            $this->col("SELECT reason FROM v_rejected_recipients WHERE email = 'ghost@example.com'")
+        );
+    }
+
+    public function test_list_with_only_suspended_members_is_rejected_as_empty(): void
+    {
+        $this->exec('UPDATE list_members SET status = ? WHERE list_id = ?', ['suspended', $this->team]);
+
+        $this->assertContains('team@example.com list_empty', $this->rejected());
+        $this->assertContains('team@example.net list_empty', $this->rejected());
+    }
+
+    public function test_list_whose_members_are_all_unable_to_receive_is_rejected_as_empty(): void
+    {
+        // alice was the only deliverable member: bob is suspended, dave's row is suspended
+        // and erin's domain is suspended.
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['suspended', $this->alice]);
+
+        $this->assertContains('team@example.com list_empty', $this->rejected());
+        $this->assertContains('alice@example.com mailbox_inactive', $this->rejected());
+    }
+
+    public function test_list_without_members_is_rejected_as_empty(): void
+    {
+        $this->mailList($this->example, 'fresh');
+
+        $this->assertContains('fresh@example.com list_empty', $this->rejected());
+        $this->assertContains('fresh@example.net list_empty', $this->rejected());
+    }
+
+    public function test_suspended_list_is_inactive_even_when_it_has_no_members(): void
+    {
+        $this->mailList($this->example, 'quiet', 'domain', 'suspended');
+
+        $this->assertContains('quiet@example.com list_inactive', $this->rejected());
+    }
+
+    public function test_catch_all_alias_is_never_rejected(): void
+    {
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
+
+        $this->exec("UPDATE aliases SET active = 0 WHERE local_part = ''");
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
+
+        $this->exec("DELETE FROM alias_targets WHERE alias_id IN (SELECT id FROM aliases WHERE local_part = '')");
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '@%'"));
+    }
+
+    public function test_alias_domain_of_a_suspended_domain_is_not_rejected(): void
+    {
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE '%@other.net'"));
+    }
+
+    public function test_address_in_several_states_gets_one_row(): void
+    {
+        // bob is a suspended mailbox; the same address as a disabled alias is a second reason.
+        $id = $this->alias($this->example, 'bob', ['alice@example.com']);
+        $this->exec('UPDATE aliases SET active = 0 WHERE id = ?', [$id]);
+
+        $this->assertSame(
+            ['alias_inactive'],
+            $this->col("SELECT reason FROM v_rejected_recipients WHERE email = 'bob@example.com'")
+        );
+        $this->assertSame(
+            ['bob@example.com', 'bob@example.net', 'old@example.com', 'old@example.net'],
+            $this->col('SELECT email FROM v_rejected_recipients')
+        );
+
+        // The helper view already has one row per local part.
+        $this->assertSame(
+            ['alias_inactive'],
+            $this->col(
+                'SELECT reason FROM v_rejected_local WHERE domain_id = ? AND local_part = ?',
+                [$this->example, 'bob']
+            )
+        );
+    }
+
+    public function test_rejected_recipients_change_immediately(): void
+    {
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['active', $this->bob]);
+        $this->assertSame(['old@example.com', 'old@example.net'], $this->col('SELECT email FROM v_rejected_recipients'));
+
+        $this->exec('UPDATE lists SET status = ? WHERE id = ?', ['active', $this->old]);
+        $this->assertSame([], $this->col('SELECT email FROM v_rejected_recipients'));
+
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['suspended', $this->carol]);
+        $this->assertSame(
+            ['carol@example.com', 'carol@example.net'],
+            $this->col('SELECT email FROM v_rejected_recipients')
+        );
+    }
+
+    public function test_reactivating_bob_removes_his_rows(): void
+    {
+        $this->exec('UPDATE mailboxes SET status = ? WHERE id = ?', ['active', $this->bob]);
+
+        $this->assertSame(
+            [],
+            $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE 'bob@%'")
+        );
+        $this->assertSame(['bob@example.com'], $this->col("SELECT email FROM v_mailboxes WHERE email LIKE 'bob@%'"));
     }
 }

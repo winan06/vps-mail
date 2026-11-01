@@ -9,7 +9,8 @@
 --     empty local part, so its source comes out as '@domain'.
 --   * Safe to re-run: CREATE OR REPLACE VIEW. Views are listed in dependency order,
 --     so v_local_addresses comes before v_aliases, which reads it.
---   * v_local_addresses is an internal helper and is never granted to a service user.
+--   * v_local_addresses and v_rejected_local are internal helpers and are never granted
+--     to a service user.
 
 -- Every address that exists as a local recipient: active mailboxes, active
 -- non-catch-all aliases and active lists. UNION removes duplicates.
@@ -148,3 +149,79 @@ JOIN domains md ON md.name = SUBSTRING_INDEX(t.destination, '@', -1)
 JOIN mailboxes m ON m.domain_id = md.id AND CONCAT(m.local_part, '@', md.name) = t.destination
 WHERE a.active = 1 AND a.local_part <> '' AND ad.status = 'active'
   AND m.status = 'active' AND md.status = 'active';
+
+-- Addresses that exist in the database but must not receive mail, in active domains only.
+-- Postfix tries the full address before the catch-all '@domain', and a non-active mailbox,
+-- list or alias has no v_aliases row, so without this view its mail would fall through to
+-- the catch-all and land in someone else's mailbox. Step 2 wires v_rejected_recipients as
+-- check_recipient_access, which rejects before any virtual lookup.
+--
+-- v_rejected_local has one row per (domain_id, local_part) with the reason:
+--   mailbox_inactive  a mailbox that is suspended or deleting;
+--   list_inactive     a list that is suspended;
+--   list_empty        an active list with no deliverable member (the same member test as
+--                     part d of v_aliases: active member row, active mailbox, active domain);
+--   alias_inactive    an alias with active = 0;
+--   alias_empty       an active alias with no alias_targets row.
+-- Catch-all aliases (empty local part) are never listed. If one local part falls under
+-- several reasons, the alphabetically first reason wins (MIN), so there is one row each.
+CREATE OR REPLACE VIEW v_rejected_local AS
+SELECT r.domain_id AS domain_id, r.local_part AS local_part, MIN(r.reason) AS reason
+FROM (
+    SELECT m.domain_id AS domain_id, m.local_part AS local_part, 'mailbox_inactive' AS reason
+    FROM mailboxes m
+    JOIN domains d ON d.id = m.domain_id
+    WHERE m.status <> 'active' AND d.status = 'active'
+    UNION ALL
+    SELECT
+        l.domain_id,
+        l.local_part,
+        CASE WHEN l.status <> 'active' THEN 'list_inactive' ELSE 'list_empty' END
+    FROM lists l
+    JOIN domains d ON d.id = l.domain_id
+    WHERE d.status = 'active'
+      AND (
+          l.status <> 'active'
+          OR NOT EXISTS (
+              SELECT 1
+              FROM list_members lm
+              JOIN mailboxes m ON m.id = lm.mailbox_id
+              JOIN domains md ON md.id = m.domain_id
+              WHERE lm.list_id = l.id
+                AND lm.status = 'active'
+                AND m.status = 'active' AND md.status = 'active'
+          )
+      )
+    UNION ALL
+    SELECT
+        a.domain_id,
+        a.local_part,
+        CASE WHEN a.active = 0 THEN 'alias_inactive' ELSE 'alias_empty' END
+    FROM aliases a
+    JOIN domains d ON d.id = a.domain_id
+    WHERE a.local_part <> '' AND d.status = 'active'
+      AND (
+          a.active = 0
+          OR NOT EXISTS (SELECT 1 FROM alias_targets t WHERE t.alias_id = a.id)
+      )
+) r
+GROUP BY r.domain_id, r.local_part;
+
+-- The rejected addresses as full emails, one row per email: the rows of v_rejected_local,
+-- plus lp@alias_domain for each of them whose domain is the target of an alias domain
+-- (the target domain must be active, as v_domains requires for the alias domain to work).
+CREATE OR REPLACE VIEW v_rejected_recipients AS
+SELECT u.email AS email, MIN(u.reason) AS reason
+FROM (
+    SELECT CONCAT(r.local_part, '@', d.name) AS email, r.reason AS reason
+    FROM v_rejected_local r
+    JOIN domains d ON d.id = r.domain_id
+    WHERE d.status = 'active'
+    UNION ALL
+    SELECT CONCAT(r.local_part, '@', da.alias_domain), r.reason
+    FROM domain_aliases da
+    JOIN domains td ON td.id = da.target_domain_id
+    JOIN v_rejected_local r ON r.domain_id = td.id
+    WHERE td.status = 'active'
+) u
+GROUP BY u.email;
