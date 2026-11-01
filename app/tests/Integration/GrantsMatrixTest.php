@@ -38,8 +38,6 @@ final class GrantsMatrixTest extends DbTestCase
     private const KICK = 'INSERT INTO v_portal_deployments (job_type, payload, requested_by_type, requested_by_id) '
         . "VALUES ('doveadm_kick', '{}', 'mailbox', 1)";
 
-    private PDO $pdo;
-
     /** @var array<string,string> */
     private array $passwords = [];
 
@@ -49,7 +47,6 @@ final class GrantsMatrixTest extends DbTestCase
 
         $this->freshDatabase();
         $this->migrateAll();
-        $this->pdo = $this->rootPdo();
 
         $example = $this->domain('example.com');
         $this->mailbox($example, 'alice');
@@ -61,23 +58,9 @@ final class GrantsMatrixTest extends DbTestCase
         $this->provisioner()->provisionAll($this->passwords);
     }
 
-    protected function tearDown(): void
-    {
-        // PHPUnit keeps every test object until the run ends. Release the root connection now, or
-        // this class alone would hold one connection per test open and exhaust max_connections.
-        unset($this->pdo);
-
-        parent::tearDown();
-    }
-
-    protected function pdo(): PDO
-    {
-        return $this->pdo;
-    }
-
     private function provisioner(): UserProvisioner
     {
-        return new UserProvisioner($this->pdo, self::DATABASE, self::HOSTS);
+        return new UserProvisioner($this->pdo(), self::DATABASE, self::HOSTS);
     }
 
     private function connectAs(string $user, ?string $password = null): PDO
@@ -236,7 +219,7 @@ final class GrantsMatrixTest extends DbTestCase
             );
         }
 
-        $this->assertSame(4, (int) $this->pdo->query("SELECT COUNT(*) FROM audit_log WHERE action = 'grants.test'")->fetchColumn());
+        $this->assertSame(4, (int) $this->pdo()->query("SELECT COUNT(*) FROM audit_log WHERE action = 'grants.test'")->fetchColumn());
     }
 
     public function test_mailctl_database_grant_does_not_reach_sibling_databases(): void
@@ -244,12 +227,12 @@ final class GrantsMatrixTest extends DbTestCase
         // In a database-level grant "_" matches any one character, so an unescaped
         // `mailhost_test`.* would also cover a sibling database such as mailhostXtest.
         $sibling = 'mailhostXtest';
-        $this->pdo->exec("DROP DATABASE IF EXISTS `$sibling`");
-        $this->pdo->exec("CREATE DATABASE `$sibling`");
+        $this->pdo()->exec("DROP DATABASE IF EXISTS `$sibling`");
+        $this->pdo()->exec("CREATE DATABASE `$sibling`");
 
         try {
-            $this->pdo->exec("CREATE TABLE `$sibling`.secrets (x INT)");
-            $this->pdo->exec("INSERT INTO `$sibling`.secrets VALUES (1)");
+            $this->pdo()->exec("CREATE TABLE `$sibling`.secrets (x INT)");
+            $this->pdo()->exec("INSERT INTO `$sibling`.secrets VALUES (1)");
 
             $mailctl = $this->connectAs('mailctl');
 
@@ -257,7 +240,7 @@ final class GrantsMatrixTest extends DbTestCase
             $this->assertInstanceOf(PDOStatement::class, $mailctl->query('SELECT * FROM v_auth'));
             $this->assertDenied($mailctl, "SELECT * FROM `$sibling`.secrets", [self::TABLE_DENIED]);
         } finally {
-            $this->pdo->exec("DROP DATABASE IF EXISTS `$sibling`");
+            $this->pdo()->exec("DROP DATABASE IF EXISTS `$sibling`");
         }
     }
 
@@ -285,7 +268,7 @@ final class GrantsMatrixTest extends DbTestCase
 
     public function test_reprovision_removes_stray_grants(): void
     {
-        $this->pdo->exec('GRANT SELECT ON ' . self::DATABASE . ".mailboxes TO mail_ro@'127.0.0.1'");
+        $this->pdo()->exec('GRANT SELECT ON ' . self::DATABASE . ".mailboxes TO mail_ro@'127.0.0.1'");
         $this->assertInstanceOf(PDOStatement::class, $this->connectAs('mail_ro')->query('SELECT * FROM mailboxes'));
 
         $password = bin2hex(random_bytes(16));
@@ -405,7 +388,7 @@ final class GrantsMatrixTest extends DbTestCase
     public function test_constructor_rejects_bad_database_and_hosts(string $db, array $hosts): void
     {
         $this->expectException(InvalidArgumentException::class);
-        new UserProvisioner($this->pdo, $db, $hosts);
+        new UserProvisioner($this->pdo(), $db, $hosts);
     }
 
     /** @return array<string,array{string,list<string>}> */
@@ -498,8 +481,8 @@ final class GrantsMatrixTest extends DbTestCase
     /** @return list<string> */
     private function grantLines(string $user, string $host): array
     {
-        return $this->pdo
-            ->query('SHOW GRANTS FOR ' . $this->pdo->quote($user) . '@' . $this->pdo->quote($host))
+        return $this->pdo()
+            ->query('SHOW GRANTS FOR ' . $this->pdo()->quote($user) . '@' . $this->pdo()->quote($host))
             ->fetchAll(PDO::FETCH_COLUMN);
     }
 

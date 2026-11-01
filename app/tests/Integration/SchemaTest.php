@@ -50,15 +50,12 @@ final class SchemaTest extends DbTestCase
         'settings',
     ];
 
-    private PDO $pdo;
-
     protected function setUp(): void
     {
         parent::setUp();
 
         $this->freshDatabase();
         $this->migrateAll();
-        $this->pdo = $this->rootPdo();
     }
 
     // ---- helpers -----------------------------------------------------------------
@@ -66,7 +63,7 @@ final class SchemaTest extends DbTestCase
     /** @param list<mixed> $params */
     private function query(string $sql, array $params = []): PDOStatement
     {
-        $stmt = $this->pdo->prepare($sql);
+        $stmt = $this->pdo()->prepare($sql);
         $stmt->execute($params);
 
         return $stmt;
@@ -83,7 +80,7 @@ final class SchemaTest extends DbTestCase
     {
         $this->query($sql, $params);
 
-        return (int) $this->pdo->lastInsertId();
+        return (int) $this->pdo()->lastInsertId();
     }
 
     /** @param list<mixed> $params */
@@ -134,7 +131,7 @@ final class SchemaTest extends DbTestCase
 
     public function test_all_base_tables_exist(): void
     {
-        $names = $this->pdo->query(
+        $names = $this->pdo()->query(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() "
             . "AND table_type = 'BASE TABLE' AND table_name <> 'schema_migrations'"
         )->fetchAll(PDO::FETCH_COLUMN);
@@ -473,7 +470,7 @@ final class SchemaTest extends DbTestCase
     public function test_seeds(): void
     {
         $permissions = [];
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             'SELECT r.name AS role, rp.permission FROM roles r JOIN role_permissions rp ON rp.role_id = r.id'
         )->fetchAll();
         foreach ($rows as $row) {
@@ -499,10 +496,10 @@ final class SchemaTest extends DbTestCase
         $this->assertSame(['domain_admin' => $domainAdmin, 'super_admin' => $superAdmin], $permissions);
         $this->assertSame(
             ['domain_admin', 'super_admin'],
-            $this->pdo->query('SELECT name FROM roles ORDER BY name')->fetchAll(PDO::FETCH_COLUMN)
+            $this->pdo()->query('SELECT name FROM roles ORDER BY name')->fetchAll(PDO::FETCH_COLUMN)
         );
 
-        $settings = $this->pdo->query('SELECT `key`, value FROM settings ORDER BY `key`')->fetchAll(PDO::FETCH_KEY_PAIR);
+        $settings = $this->pdo()->query('SELECT `key`, value FROM settings ORDER BY `key`')->fetchAll(PDO::FETCH_KEY_PAIR);
         $expected = [
             'otp_ttl_minutes' => '10',
             'otp_max_attempts' => '5',
@@ -515,7 +512,7 @@ final class SchemaTest extends DbTestCase
         ksort($expected);
         $this->assertSame($expected, $settings);
 
-        $global = $this->pdo->query('SELECT * FROM filter_global')->fetchAll();
+        $global = $this->pdo()->query('SELECT * FROM filter_global')->fetchAll();
         $this->assertCount(1, $global);
         $this->assertEquals(
             [
@@ -534,7 +531,7 @@ final class SchemaTest extends DbTestCase
 
     public function test_migrations_rerunnable(): void
     {
-        $this->pdo->exec('DELETE FROM schema_migrations');
+        $this->pdo()->exec('DELETE FROM schema_migrations');
 
         $this->migrateAll();
 
@@ -544,7 +541,7 @@ final class SchemaTest extends DbTestCase
         $this->assertSame(1, (int) $this->scalar('SELECT COUNT(*) FROM filter_global'));
         $this->assertSame(
             $this->migrationVersionsOnDisk(),
-            $this->pdo->query('SELECT version FROM schema_migrations ORDER BY version')->fetchAll(PDO::FETCH_COLUMN)
+            $this->pdo()->query('SELECT version FROM schema_migrations ORDER BY version')->fetchAll(PDO::FETCH_COLUMN)
         );
     }
 

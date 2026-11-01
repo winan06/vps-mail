@@ -30,8 +30,6 @@ final class MailViewsTest extends DbTestCase
         'v_rejected_recipients' => ['email', 'reason'],
     ];
 
-    private PDO $pdo;
-
     private int $example;
     private int $other;
     private int $alice;
@@ -48,13 +46,7 @@ final class MailViewsTest extends DbTestCase
 
         $this->freshDatabase();
         $this->migrateAll();
-        $this->pdo = $this->rootPdo();
         $this->buildFixture();
-    }
-
-    protected function pdo(): PDO
-    {
-        return $this->pdo;
     }
 
     /**
@@ -125,7 +117,7 @@ final class MailViewsTest extends DbTestCase
     /** @param list<mixed> $params */
     private function exec(string $sql, array $params = []): void
     {
-        $this->pdo->prepare($sql)->execute($params);
+        $this->pdo()->prepare($sql)->execute($params);
     }
 
     // ---- shape -------------------------------------------------------------------
@@ -133,7 +125,7 @@ final class MailViewsTest extends DbTestCase
     public function test_views_expose_exactly_the_documented_columns(): void
     {
         foreach (self::COLUMNS as $view => $columns) {
-            $actual = $this->pdo->query(
+            $actual = $this->pdo()->query(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() "
                 . "AND table_name = '$view' ORDER BY ordinal_position"
             )->fetchAll(PDO::FETCH_COLUMN);
@@ -149,7 +141,7 @@ final class MailViewsTest extends DbTestCase
     public function test_every_text_column_is_ascii_bin(): void
     {
         $views = array_keys(self::COLUMNS);
-        $stmt = $this->pdo->prepare(
+        $stmt = $this->pdo()->prepare(
             "SELECT CONCAT(table_name, '.', column_name, ' ', collation_name) FROM information_schema.columns "
             . "WHERE table_schema = DATABASE() AND table_name IN ("
             . implode(', ', array_fill(0, count($views), '?'))
@@ -168,7 +160,7 @@ final class MailViewsTest extends DbTestCase
         $statements = SqlSplitter::split($sql);
         $this->assertNotSame([], $statements);
         foreach ($statements as $statement) {
-            $this->pdo->exec($statement);
+            $this->pdo()->exec($statement);
         }
 
         $this->assertSame(['example.com', 'example.net'], $this->col('SELECT name FROM v_domains'));
@@ -189,7 +181,7 @@ final class MailViewsTest extends DbTestCase
         );
         $this->assertSame(
             'example.com/alice/',
-            $this->pdo->query("SELECT maildir FROM v_mailboxes WHERE email = 'alice@example.com'")->fetchColumn()
+            $this->pdo()->query("SELECT maildir FROM v_mailboxes WHERE email = 'alice@example.com'")->fetchColumn()
         );
     }
 
@@ -199,7 +191,7 @@ final class MailViewsTest extends DbTestCase
 
         $this->assertSame(
             250,
-            (int) $this->pdo->query("SELECT quota_mb FROM v_mailboxes WHERE email = 'carol@example.com'")->fetchColumn()
+            (int) $this->pdo()->query("SELECT quota_mb FROM v_mailboxes WHERE email = 'carol@example.com'")->fetchColumn()
         );
     }
 
@@ -207,11 +199,11 @@ final class MailViewsTest extends DbTestCase
     {
         $this->assertStringStartsWith(
             '{ARGON2ID}$argon2id$',
-            (string) $this->pdo->query("SELECT password FROM v_auth WHERE email = 'alice@example.com'")->fetchColumn()
+            (string) $this->pdo()->query("SELECT password FROM v_auth WHERE email = 'alice@example.com'")->fetchColumn()
         );
         $this->assertStringStartsWith(
             '{BLF-CRYPT}$2y$',
-            (string) $this->pdo->query("SELECT password FROM v_auth WHERE email = 'carol@example.com'")->fetchColumn()
+            (string) $this->pdo()->query("SELECT password FROM v_auth WHERE email = 'carol@example.com'")->fetchColumn()
         );
         $this->assertSame([], $this->col("SELECT email FROM v_auth WHERE email = 'bob@example.com'"));
     }
@@ -315,7 +307,7 @@ final class MailViewsTest extends DbTestCase
 
     public function test_aliases_view_is_complete(): void
     {
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             "SELECT CONCAT(source, ' > ', destination) FROM v_aliases"
         )->fetchAll(PDO::FETCH_COLUMN);
         sort($rows, SORT_STRING);
@@ -439,7 +431,7 @@ final class MailViewsTest extends DbTestCase
 
     public function test_v_sender_login_is_complete(): void
     {
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             "SELECT CONCAT(sender, ' < ', login) FROM v_sender_login"
         )->fetchAll(PDO::FETCH_COLUMN);
         sort($rows, SORT_STRING);
@@ -533,7 +525,7 @@ final class MailViewsTest extends DbTestCase
 
     public function test_v_local_addresses_is_mailboxes_aliases_and_lists_of_active_domains(): void
     {
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             "SELECT CONCAT(d.name, '/', la.local_part) FROM v_local_addresses la JOIN domains d ON d.id = la.domain_id"
         )->fetchAll(PDO::FETCH_COLUMN);
         sort($rows, SORT_STRING);
@@ -581,7 +573,7 @@ final class MailViewsTest extends DbTestCase
 
     public function test_rejected_recipients_never_have_alias_rows(): void
     {
-        $overlap = $this->pdo->query(
+        $overlap = $this->pdo()->query(
             'SELECT COUNT(*) FROM v_rejected_recipients r JOIN v_aliases a ON a.source = r.email'
         )->fetchColumn();
 

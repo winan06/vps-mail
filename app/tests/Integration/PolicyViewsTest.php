@@ -26,8 +26,6 @@ final class PolicyViewsTest extends DbTestCase
     private const KICK = 'INSERT INTO v_portal_deployments (job_type, payload, requested_by_type, requested_by_id) '
         . 'VALUES (?, ?, ?, ?)';
 
-    private PDO $pdo;
-
     private int $example;
     private int $other;
     private int $alice;
@@ -45,13 +43,7 @@ final class PolicyViewsTest extends DbTestCase
 
         $this->freshDatabase();
         $this->migrateAll();
-        $this->pdo = $this->rootPdo();
         $this->buildFixture();
-    }
-
-    protected function pdo(): PDO
-    {
-        return $this->pdo;
     }
 
     /**
@@ -105,13 +97,13 @@ final class PolicyViewsTest extends DbTestCase
     /** @param list<mixed> $params */
     private function exec(string $sql, array $params = []): void
     {
-        $this->pdo->prepare($sql)->execute($params);
+        $this->pdo()->prepare($sql)->execute($params);
     }
 
     /** @param list<mixed> $params */
     private function scalar(string $sql, array $params = []): mixed
     {
-        $stmt = $this->pdo->prepare($sql);
+        $stmt = $this->pdo()->prepare($sql);
         $stmt->execute($params);
 
         return $stmt->fetchColumn();
@@ -183,7 +175,7 @@ final class PolicyViewsTest extends DbTestCase
         ];
 
         foreach ($expected as $view => $columns) {
-            $actual = $this->pdo->query(
+            $actual = $this->pdo()->query(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() "
                 . "AND table_name = '$view' ORDER BY ordinal_position"
             )->fetchAll(PDO::FETCH_COLUMN);
@@ -194,7 +186,7 @@ final class PolicyViewsTest extends DbTestCase
 
     public function test_identifier_columns_are_ascii_bin(): void
     {
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             "SELECT CONCAT(table_name, '.', column_name, ' ', collation_name) FROM information_schema.columns "
             . "WHERE table_schema = DATABASE() AND collation_name IS NOT NULL "
             . "AND ((table_name IN ('v_lists', 'v_list_sender_rules') AND column_name = 'address') "
@@ -214,7 +206,7 @@ final class PolicyViewsTest extends DbTestCase
 
     public function test_portal_view_is_updatable_with_a_cascaded_check_option(): void
     {
-        $row = $this->pdo->query(
+        $row = $this->pdo()->query(
             "SELECT check_option, is_updatable FROM information_schema.views "
             . "WHERE table_schema = DATABASE() AND table_name = 'v_portal_deployments'"
         )->fetch(PDO::FETCH_NUM);
@@ -230,7 +222,7 @@ final class PolicyViewsTest extends DbTestCase
         $statements = SqlSplitter::split($sql);
         $this->assertNotSame([], $statements);
         foreach ($statements as $statement) {
-            $this->pdo->exec($statement);
+            $this->pdo()->exec($statement);
         }
 
         $this->assertSame(['big@example.com domain 512', 'team@example.com universal 25600'], $this->lists());
@@ -407,7 +399,7 @@ final class PolicyViewsTest extends DbTestCase
     {
         $this->exec(self::KICK, ['doveadm_kick', $this->kickPayload(), 'mailbox', $this->alice]);
 
-        $rows = $this->pdo->query(
+        $rows = $this->pdo()->query(
             'SELECT job_type, payload, status, requested_by_type, requested_by_id, created_at, finished_at, log '
             . 'FROM deployments'
         )->fetchAll(PDO::FETCH_ASSOC);
@@ -507,7 +499,7 @@ final class PolicyViewsTest extends DbTestCase
     public function test_portal_view_cannot_turn_a_kick_into_another_job(): void
     {
         $this->exec(self::KICK, ['doveadm_kick', $this->kickPayload(), 'mailbox', $this->alice]);
-        $id = (int) $this->pdo->lastInsertId();
+        $id = (int) $this->pdo()->lastInsertId();
 
         $this->assertSqlError(
             self::CHECK_OPTION_FAILED,

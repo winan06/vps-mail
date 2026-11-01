@@ -9,7 +9,8 @@ use PDO;
 
 /**
  * Opens PDO connections with the settings every mailhost connection needs:
- * exception errors, native prepared statements, utf8mb4 and a UTC session.
+ * exception errors, native prepared statements, one statement per call, utf8mb4
+ * and a UTC session.
  */
 final class Connection
 {
@@ -72,7 +73,7 @@ final class Connection
     /**
      * Creates the database if it does not exist yet.
      *
-     * @throws InvalidArgumentException when $db does not match /^[a-z0-9_]+$/
+     * @throws InvalidArgumentException when $db is not only a-z, 0-9 and _
      */
     public static function ensureDatabase(PDO $rootNoDb, string $db): void
     {
@@ -88,6 +89,9 @@ final class Connection
         return new PDO($dsn . ';charset=utf8mb4', $user, $password, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_EMULATE_PREPARES => false,
+            // exec() sends its string unprepared; without this a string carrying an injected
+            // "; ..." would run as several statements. The Migrator sends one at a time anyway.
+            PDO::MYSQL_ATTR_MULTI_STATEMENTS => false,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::MYSQL_ATTR_INIT_COMMAND => "SET time_zone = '+00:00'",
         ]);
@@ -104,7 +108,8 @@ final class Connection
 
     private static function assertDatabaseName(string $db): void
     {
-        if (preg_match('/^[a-z0-9_]+$/', $db) !== 1) {
+        // \z, not $: $ would also accept a name with a trailing newline.
+        if (preg_match('/^[a-z0-9_]+\z/', $db) !== 1) {
             throw new InvalidArgumentException("Invalid database name: $db");
         }
     }
