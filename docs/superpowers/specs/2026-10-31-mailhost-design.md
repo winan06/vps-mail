@@ -1,7 +1,7 @@
 # Mailhost — Design Spec
 
 **Date:** 2026-10-31
-**Status:** Step 1 built (branch step1-schema). §17 version 1 additions drafted 2026-11-01, awaiting review.
+**Status:** Step 1 built (branch step1-schema). §17 version 1 additions approved 2026-11-01 (including the FR-083 login-code deviation in 17.5).
 **Source requirements:** "Multi-Domain Email Hosting and Management System" SRS (Postfix, Dovecot, Rspamd, ClamAV)
 **Build approach:** New system, built from scratch.
 
