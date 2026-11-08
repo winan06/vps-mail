@@ -19,6 +19,8 @@ use PDOStatement;
  */
 final class SchemaTest extends DbTestCase
 {
+    use Fixtures;
+
     private const CHECK_FAILED = 4025;
     private const DUPLICATE_KEY = 1062;
     private const ROW_IS_REFERENCED = 1451;
@@ -640,6 +642,138 @@ final class SchemaTest extends DbTestCase
             ],
             $global[0]
         );
+    }
+
+    // ---- 0007: mailbox profile, kind and security columns -------------------------
+
+    public function test_new_mailbox_columns_and_defaults(): void
+    {
+        $stmt = $this->pdo()->prepare(
+            'SELECT column_type, is_nullable, column_default, character_set_name FROM information_schema.columns '
+            . 'WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?'
+        );
+        $expected = [
+            'mailboxes.display_name' => ['varchar(128)', 'YES', 'NULL', 'utf8mb4'],
+            'mailboxes.job_title' => ['varchar(128)', 'YES', 'NULL', 'utf8mb4'],
+            'mailboxes.department' => ['varchar(128)', 'YES', 'NULL', 'utf8mb4'],
+            'mailboxes.phone' => ['varchar(32)', 'YES', 'NULL', 'ascii'],
+            'mailboxes.directory_visible' => ['tinyint(1)', 'NO', '1', null],
+            'mailboxes.kind' => ["enum('personal','shared')", 'NO', "'personal'", 'utf8mb4'],
+            'mailboxes.require_app_passwords' => ['tinyint(1)', 'NO', '0', null],
+            'mailboxes.quota_warned_level' => ['tinyint(3) unsigned', 'NO', '0', null],
+            'mailboxes.must_change_password' => ['tinyint(1)', 'NO', '0', null],
+            'mailboxes.password_hash' => ['varchar(255)', 'YES', 'NULL', 'ascii'],
+            'domains.mta_sts_mode' => ["enum('none','testing','enforce')", 'NO', "'testing'", 'utf8mb4'],
+        ];
+
+        foreach ($expected as $column => $shape) {
+            [$table, $name] = explode('.', $column);
+            $stmt->execute([$table, $name]);
+            $this->assertSame($shape, $stmt->fetch(PDO::FETCH_NUM), $column);
+        }
+    }
+
+    public function test_shared_mailbox_has_no_credentials(): void
+    {
+        $domainId = $this->domain('example.com');
+        $insert = 'INSERT INTO mailboxes (domain_id, local_part, password_hash, recovery_email, kind) VALUES (?, ?, ?, ?, ?)';
+        $rule = 'chk_mailboxes_kind_credentials';
+
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$domainId, 'support', self::HASH_ARGON, null, 'shared'], $rule);
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$domainId, 'support', null, 'boss@gmail.com', 'shared'], $rule);
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$domainId, 'alice', null, null, 'personal'], $rule);
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'INSERT INTO mailboxes (domain_id, local_part, kind, require_app_passwords) VALUES (?, ?, ?, 1)',
+            [$domainId, 'support', 'shared'],
+            $rule
+        );
+
+        $shared = $this->sharedMailbox($domainId, 'support');
+        $this->assertSame(
+            ['shared', null, null],
+            $this->query('SELECT kind, password_hash, recovery_email FROM mailboxes WHERE id = ?', [$shared])->fetch(PDO::FETCH_NUM)
+        );
+
+        // A personal mailbox cannot lose its password later, and a shared one cannot gain one.
+        $personal = $this->mailbox($domainId, 'alice');
+        $this->assertSqlError(self::CHECK_FAILED, 'UPDATE mailboxes SET password_hash = NULL WHERE id = ?', [$personal], $rule);
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'UPDATE mailboxes SET password_hash = ? WHERE id = ?',
+            [self::HASH_ARGON, $shared],
+            $rule
+        );
+    }
+
+    /**
+     * @dataProvider badProfileValues
+     */
+    public function test_profile_text_rules(string $column, string $value, string $constraint): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+
+        $this->assertSqlError(self::CHECK_FAILED, "UPDATE mailboxes SET $column = ? WHERE id = ?", [$value, $mailbox], $constraint);
+    }
+
+    /** @return array<string,array{string,string,string}> */
+    public function badProfileValues(): array
+    {
+        $cases = [];
+        foreach (['display_name', 'job_title', 'department'] as $column) {
+            foreach (['empty' => '', 'a newline' => "a\nb", 'a tab' => "a\tb"] as $what => $value) {
+                $cases["$column with $what"] = [$column, $value, "chk_mailboxes_{$column}_text"];
+            }
+        }
+        foreach (['letters' => 'abc', 'one digit' => '1', 'a trailing newline' => "+265 99 123 4567\n"] as $what => $value) {
+            $cases["phone with $what"] = ['phone', $value, 'chk_mailboxes_phone_format'];
+        }
+
+        return $cases;
+    }
+
+    public function test_profile_text_accepts_valid_values(): void
+    {
+        $domainId = $this->domain('example.com');
+        $update = 'UPDATE mailboxes SET display_name = ?, job_title = ?, department = ?, phone = ? WHERE id = ?';
+
+        $this->query($update, ['Chikondi Banda', 'Head of Finance', 'Finance', '+265 991 234 567', $this->mailbox($domainId, 'a')]);
+        $this->query($update, ['Zoë Ménard', 'Ingénieure', 'R&D', '(01) 234-5678', $this->mailbox($domainId, 'b')]);
+
+        $this->assertSame(
+            ['Chikondi Banda', 'Zoë Ménard'],
+            $this->pdo()->query('SELECT display_name FROM mailboxes ORDER BY id')->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    public function test_quota_warned_level_bounds(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            'UPDATE mailboxes SET quota_warned_level = 101 WHERE id = ?',
+            [$mailbox],
+            'chk_mailboxes_quota_warned_level_range'
+        );
+        $this->query('UPDATE mailboxes SET quota_warned_level = 95 WHERE id = ?', [$mailbox]);
+        $this->assertSame(95, (int) $this->scalar('SELECT quota_warned_level FROM mailboxes WHERE id = ?', [$mailbox]));
+    }
+
+    public function test_existing_rows_get_defaults(): void
+    {
+        $domainId = $this->domain('example.com');
+        $mailbox = $this->mailbox($domainId, 'alice');
+
+        $this->assertEquals(
+            ['personal', 1, 0, 0, 0, null],
+            $this->query(
+                'SELECT kind, directory_visible, require_app_passwords, must_change_password, quota_warned_level, display_name '
+                . 'FROM mailboxes WHERE id = ?',
+                [$mailbox]
+            )->fetch(PDO::FETCH_NUM)
+        );
+        $this->assertSame('testing', $this->scalar('SELECT mta_sts_mode FROM domains WHERE id = ?', [$domainId]));
     }
 
     public function test_migrations_rerunnable(): void
