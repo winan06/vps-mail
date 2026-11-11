@@ -38,7 +38,10 @@ final class SchemaTest extends DbTestCase
         'delivery_events',
         'deployments',
         'dkim_keys',
+        'dmarc_records',
+        'dmarc_reports',
         'domain_aliases',
+        'domain_checks',
         'domains',
         'filter_global',
         'filter_policies',
@@ -50,14 +53,21 @@ final class SchemaTest extends DbTestCase
         'log_cursors',
         'login_events',
         'mailboxes',
+        'migration_jobs',
         'otp_codes',
         'quarantine_items',
+        'quota_requests',
         'recovery_codes',
+        'release_requests',
         'role_permissions',
         'roles',
         'sessions',
         'settings',
+        'shared_access',
+        'sieve_rules',
+        'spam_sender_lists',
         'totp_secrets',
+        'vacation_settings',
     ];
 
     protected function setUp(): void
@@ -155,7 +165,7 @@ final class SchemaTest extends DbTestCase
         )->fetchAll(PDO::FETCH_COLUMN);
         sort($names);
 
-        $this->assertCount(29, self::TABLES);
+        $this->assertCount(39, self::TABLES);
         $this->assertSame(self::TABLES, $names);
     }
 
@@ -629,6 +639,13 @@ final class SchemaTest extends DbTestCase
             'retention_suspended_days' => '30',
             'retention_archive_days' => '90',
             'max_message_mb' => '25',
+            'quota_warn_levels' => '80,90,95',
+            'admin_require_2fa' => 'no',
+            'login_alert_new_country' => 'yes',
+            'digest_hour_utc' => '6',
+            'login_events_retention_days' => '90',
+            'delivery_events_retention_days' => '30',
+            'dmarc_retention_days' => '180',
         ];
         ksort($expected);
         $this->assertSame($expected, $settings);
@@ -884,6 +901,231 @@ final class SchemaTest extends DbTestCase
         $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM delivery_events WHERE recipient_domain_id = ?', [$domainId]));
     }
 
+    // ---- 0010 to 0012: rules, out-of-office, spam lists, shared access, requests, jobs --
+
+    private const SIEVE_INSERT = 'INSERT INTO sieve_rules '
+        . '(mailbox_id, position, match_field, header_name, match_type, match_value, action, folder) '
+        . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+
+    /**
+     * Parameters for SIEVE_INSERT: a valid "subject contains invoice → flag" rule with $row on top.
+     *
+     * @param array<string,mixed> $row
+     *
+     * @return list<mixed>
+     */
+    private function sieveRow(int $mailboxId, array $row): array
+    {
+        $row += [
+            'position' => 1,
+            'match_field' => 'subject',
+            'header_name' => null,
+            'match_type' => 'contains',
+            'match_value' => 'invoice',
+            'action' => 'flag',
+            'folder' => null,
+        ];
+
+        return [
+            $mailboxId, $row['position'], $row['match_field'], $row['header_name'], $row['match_type'],
+            $row['match_value'], $row['action'], $row['folder'],
+        ];
+    }
+
+    /**
+     * @dataProvider badSieveRules
+     *
+     * @param array<string,mixed> $row
+     */
+    public function test_sieve_rule_text_rules(array $row, string $constraint): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+
+        $this->assertSqlError(self::CHECK_FAILED, self::SIEVE_INSERT, $this->sieveRow($mailbox, $row), $constraint);
+    }
+
+    /**
+     * Rule values and folder names are written into a Sieve script as quoted strings, so a quote,
+     * a backslash or a control character must never reach them.
+     *
+     * @return array<string,array{array<string,mixed>,string}>
+     */
+    public function badSieveRules(): array
+    {
+        $value = 'chk_sieve_rules_match_value_text';
+        $folder = 'chk_sieve_rules_folder_text';
+
+        return [
+            'value with a quote' => [['match_value' => 'a"b'], $value],
+            'value with a backslash' => [['match_value' => 'a\\b'], $value],
+            'value with a newline' => [['match_value' => "a\nb"], $value],
+            'value empty' => [['match_value' => ''], $value],
+            'folder starting with a slash' => [['action' => 'move', 'folder' => '/x'], $folder],
+            'folder with a quote' => [['action' => 'move', 'folder' => 'a"b'], $folder],
+            'folder with a backslash' => [['action' => 'move', 'folder' => 'a\\b'], $folder],
+            'folder with a newline' => [['action' => 'move', 'folder' => "a\nb"], $folder],
+            'folder empty' => [['action' => 'move', 'folder' => ''], $folder],
+            'move without a folder' => [['action' => 'move'], 'chk_sieve_rules_folder_by_action'],
+            'flag with a folder' => [['action' => 'flag', 'folder' => 'Work'], 'chk_sieve_rules_folder_by_action'],
+            'header rule without a header name' => [['match_field' => 'header'], 'chk_sieve_rules_header_name_by_field'],
+            'header name on a subject rule' => [['header_name' => 'X-Spam'], 'chk_sieve_rules_header_name_by_field'],
+            'header name with a space' => [['match_field' => 'header', 'header_name' => 'X Spam'], 'chk_sieve_rules_header_name_format'],
+            'header name with a colon' => [['match_field' => 'header', 'header_name' => 'X-Spam:'], 'chk_sieve_rules_header_name_format'],
+        ];
+    }
+
+    public function test_sieve_rule_accepts_valid_rows(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+        $rows = [
+            ['position' => 1, 'match_field' => 'header', 'header_name' => 'X-Spam-Flag', 'match_type' => 'is', 'match_value' => 'YES', 'action' => 'trash'],
+            ['position' => 2, 'match_field' => 'from', 'match_value' => 'boss@example.com', 'action' => 'move', 'folder' => 'Work/Boss'],
+            ['position' => 3, 'match_field' => 'to_cc', 'match_value' => 'team@', 'action' => 'mark_read'],
+            ['position' => 4, 'match_value' => 'Rechnung für März', 'action' => 'move', 'folder' => 'Rechnungen ü'],
+            ['position' => 5, 'match_value' => 'newsletter', 'action' => 'stop'],
+        ];
+        foreach ($rows as $row) {
+            $this->query(self::SIEVE_INSERT, $this->sieveRow($mailbox, $row));
+        }
+
+        $this->assertSame(5, (int) $this->scalar('SELECT COUNT(*) FROM sieve_rules WHERE active = 1'));
+        $this->assertSqlError(self::DUPLICATE_KEY, self::SIEVE_INSERT, $this->sieveRow($mailbox, ['position' => 3]));
+
+        $this->query('DELETE FROM mailboxes WHERE id = ?', [$mailbox]);
+        $this->assertSame(0, (int) $this->scalar('SELECT COUNT(*) FROM sieve_rules'));
+    }
+
+    public function test_vacation_rules(): void
+    {
+        $domainId = $this->domain('example.com');
+        $mailbox = $this->mailbox($domainId, 'alice');
+        $insert = 'INSERT INTO vacation_settings (mailbox_id, starts_at, ends_at, subject, body, interval_days, time_zone) '
+            . 'VALUES (?, ?, ?, ?, ?, ?, ?)';
+        $ok = [$mailbox, '2026-12-20 00:00:00', '2027-01-05 00:00:00', 'Out of office', "Back on 5 January.\nRegards", 7, 'Africa/Blantyre'];
+        $bad = function (int $index, mixed $value, string $constraint) use ($insert, $ok): void {
+            $this->assertSqlError(self::CHECK_FAILED, $insert, array_replace($ok, [$index => $value]), $constraint);
+        };
+
+        $bad(2, '2026-12-19 00:00:00', 'chk_vacation_settings_dates_ordered');
+        $bad(2, '2026-12-20 00:00:00', 'chk_vacation_settings_dates_ordered');
+        $bad(3, '', 'chk_vacation_settings_subject_text');
+        $bad(3, "a\nb", 'chk_vacation_settings_subject_text');
+        $bad(4, '', 'chk_vacation_settings_body_length');
+        $bad(4, str_repeat('a', 4097), 'chk_vacation_settings_body_length');
+        $bad(5, 0, 'chk_vacation_settings_interval_range');
+        $bad(5, 31, 'chk_vacation_settings_interval_range');
+        $bad(6, 'x;y', 'chk_vacation_settings_time_zone_format');
+        $bad(6, "UTC\n", 'chk_vacation_settings_time_zone_format');
+
+        $this->query($insert, $ok);
+        // 4096 characters is the limit, however many bytes they take.
+        $other = $this->mailbox($domainId, 'bob');
+        $this->query(
+            'INSERT INTO vacation_settings (mailbox_id, subject, body) VALUES (?, ?, ?)',
+            [$other, 'Away', str_repeat('é', 4096)]
+        );
+        $this->assertEquals(
+            [0, 7, 'UTC', null, null],
+            $this->query(
+                'SELECT enabled, interval_days, time_zone, starts_at, ends_at FROM vacation_settings WHERE mailbox_id = ?',
+                [$other]
+            )->fetch(PDO::FETCH_NUM)
+        );
+    }
+
+    public function test_spam_pattern_rules(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+        $insert = 'INSERT INTO spam_sender_lists (mailbox_id, list_type, pattern) VALUES (?, ?, ?)';
+
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, 'block', 'Bob@x.com'], 'chk_spam_sender_lists_pattern_lc');
+        foreach (['x.com', '@x', 'a,b@x.com', '@', 'bob@', "bob@x.com\n", 'a@b@x.com'] as $pattern) {
+            $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, 'block', $pattern], 'chk_spam_sender_lists_pattern_format');
+        }
+
+        $this->query($insert, [$mailbox, 'allow', 'bob@x.com']);
+        $this->query($insert, [$mailbox, 'block', '@x.com']);
+        // One entry per pattern: the same sender cannot be allowed and blocked at once.
+        $this->assertSqlError(self::DUPLICATE_KEY, $insert, [$mailbox, 'block', 'bob@x.com']);
+    }
+
+    public function test_shared_access_self(): void
+    {
+        $domainId = $this->domain('example.com');
+        $shared = $this->sharedMailbox($domainId, 'support');
+        $alice = $this->mailbox($domainId, 'alice');
+        $insert = 'INSERT INTO shared_access (shared_mailbox_id, member_mailbox_id) VALUES (?, ?)';
+
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$shared, $shared], 'chk_shared_access_not_self');
+
+        $this->sharedAccess($shared, $alice);
+        $this->assertSqlError(self::DUPLICATE_KEY, $insert, [$shared, $alice]);
+        $this->assertSame(
+            [1, 0],
+            array_map('intval', $this->query('SELECT can_read, can_send FROM shared_access')->fetch(PDO::FETCH_NUM))
+        );
+
+        $this->query('DELETE FROM mailboxes WHERE id = ?', [$alice]);
+        $this->assertSame(0, (int) $this->scalar('SELECT COUNT(*) FROM shared_access'));
+    }
+
+    public function test_migration_job_rules(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+        $insert = 'INSERT INTO migration_jobs (mailbox_id, host, port, tls, username, password_enc, status, expires_at) '
+            . 'VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP() + INTERVAL 7 DAY)';
+        $ok = [$mailbox, 'imap.old-provider.com', 993, 'ssl', 'alice@old-provider.com', 'ciphertext', 'queued'];
+        $bad = function (int $index, mixed $value, string $constraint) use ($insert, $ok): void {
+            $this->assertSqlError(self::CHECK_FAILED, $insert, array_replace($ok, [$index => $value]), $constraint);
+        };
+
+        $bad(2, 0, 'chk_migration_jobs_port_range');
+        $bad(1, 'Mail.Old.com', 'chk_migration_jobs_host_lc');
+        $bad(1, 'mail_old.com', 'chk_migration_jobs_host_format');
+        $bad(1, 'localhost', 'chk_migration_jobs_host_format');
+        $bad(1, 'imap.old.com:993', 'chk_migration_jobs_host_format');
+        $bad(4, '', 'chk_migration_jobs_username_text');
+        foreach (['done', 'failed', 'cancelled'] as $finished) {
+            $bad(6, $finished, 'chk_migration_jobs_password_cleared');
+        }
+
+        $job = $this->insertId($insert, $ok);
+        $this->query($insert, [$mailbox, '192.0.2.10', 143, 'starttls', 'alice', null, 'done']);
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            "UPDATE migration_jobs SET status = 'done' WHERE id = ?",
+            [$job],
+            'chk_migration_jobs_password_cleared'
+        );
+        $this->query("UPDATE migration_jobs SET status = 'done', password_enc = NULL WHERE id = ?", [$job]);
+        $this->assertSame(2, (int) $this->scalar("SELECT COUNT(*) FROM migration_jobs WHERE status = 'done'"));
+    }
+
+    public function test_job_types_and_settings(): void
+    {
+        $insert = "INSERT INTO deployments (job_type, payload, requested_by_type) VALUES (?, '{}', 'system')";
+        $new = ['domain_certs', 'sieve_compile', 'spam_lists', 'imap_migrate', 'domain_check'];
+        foreach ($new as $type) {
+            $this->query($insert, [$type]);
+        }
+        $this->assertSame($new, $this->pdo()->query('SELECT job_type FROM deployments ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
+
+        $settings = $this->pdo()->query(
+            "SELECT `key`, value FROM settings WHERE `key` IN ('quota_warn_levels', 'admin_require_2fa', "
+            . "'login_alert_new_country', 'digest_hour_utc', 'login_events_retention_days', "
+            . "'delivery_events_retention_days', 'dmarc_retention_days') ORDER BY `key`"
+        )->fetchAll(PDO::FETCH_KEY_PAIR);
+        $this->assertSame([
+            'admin_require_2fa' => 'no',
+            'delivery_events_retention_days' => '30',
+            'digest_hour_utc' => '6',
+            'dmarc_retention_days' => '180',
+            'login_alert_new_country' => 'yes',
+            'login_events_retention_days' => '90',
+            'quota_warn_levels' => '80,90,95',
+        ], $settings);
+    }
+
     public function test_migrations_rerunnable(): void
     {
         $this->pdo()->exec('DELETE FROM schema_migrations');
@@ -892,7 +1134,7 @@ final class SchemaTest extends DbTestCase
 
         $this->assertSame(20, (int) $this->scalar('SELECT COUNT(*) FROM role_permissions'));
         $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM roles'));
-        $this->assertSame(7, (int) $this->scalar('SELECT COUNT(*) FROM settings'));
+        $this->assertSame(14, (int) $this->scalar('SELECT COUNT(*) FROM settings'));
         $this->assertSame(1, (int) $this->scalar('SELECT COUNT(*) FROM filter_global'));
         $this->assertSame(
             $this->migrationVersionsOnDisk(),
