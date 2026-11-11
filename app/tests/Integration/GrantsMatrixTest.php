@@ -38,7 +38,7 @@ final class GrantsMatrixTest extends DbTestCase
         . "VALUES ('system', NULL, 'grants.test', NULL, NULL, NULL, NULL, NULL)";
 
     private const KICK = 'INSERT INTO v_portal_deployments (job_type, payload, requested_by_type, requested_by_id) '
-        . "VALUES ('doveadm_kick', '{}', 'mailbox', 1)";
+        . "VALUES ('doveadm_kick', '{\"mailbox_id\":1}', 'mailbox', 1)";
 
     /** @var array<string,string> */
     private array $passwords = [];
