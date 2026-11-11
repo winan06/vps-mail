@@ -249,8 +249,10 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mail_portal', 'SELECT * FROM migration_jobs', false);
         $add('mail_portal', 'SELECT * FROM delivery_events', false);
         $add('mail_portal', 'SELECT * FROM v_app_auth', false);
-        $add('mail_portal', "UPDATE release_requests SET status = 'approved'", true);
-        $add('mail_portal', 'UPDATE release_requests SET decided_by = 1', false);
+        $add('mail_portal', 'SELECT * FROM release_requests', true);
+        $add('mail_portal', "UPDATE release_requests SET status = 'requested'", false);
+        $add('mail_portal', "UPDATE v_portal_release_requests SET status = 'requested', requested_at = UTC_TIMESTAMP()", true);
+        $add('mail_portal', 'UPDATE v_portal_release_requests SET decided_by = 1', false);
         $add('mail_portal', "INSERT INTO quota_requests (mailbox_id, requested_mb, note) VALUES ($alice, 2048, 'More please')", true);
         $add('mail_portal', "INSERT INTO quota_requests (mailbox_id, requested_mb, status) VALUES ($alice, 2048, 'approved')", false);
 

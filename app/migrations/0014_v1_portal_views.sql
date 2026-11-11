@@ -74,3 +74,22 @@ SELECT
 FROM login_events e
 WHERE e.subject_type IN ('mailbox', 'unknown') AND e.service IN ('portal', 'dav')
 WITH CASCADED CHECK OPTION;
+
+-- Release requests the portal may still change: an offer from the digest, or a request the
+-- user has made. The portal turns 'offered' into 'requested' (with requested_at); approving,
+-- rejecting and expiring belong to admins and mailctl, so any other status leaves the view and
+-- is refused, and a decided request cannot be reopened. Release stays admin-only (spec 17.7).
+CREATE OR REPLACE VIEW v_portal_release_requests AS
+SELECT
+    r.id AS id,
+    r.quarantine_item_id AS quarantine_item_id,
+    r.mailbox_id AS mailbox_id,
+    r.token_hash AS token_hash,
+    r.status AS status,
+    r.requested_at AS requested_at,
+    r.decided_at AS decided_at,
+    r.decided_by AS decided_by,
+    r.expires_at AS expires_at
+FROM release_requests r
+WHERE r.status IN ('offered', 'requested')
+WITH CASCADED CHECK OPTION;

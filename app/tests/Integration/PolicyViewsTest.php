@@ -52,6 +52,9 @@ final class PolicyViewsTest extends DbTestCase
         'v_portal_login_events' => [
             'id', 'at', 'subject_type', 'subject_id', 'login', 'service', 'result', 'ip', 'country', 'client', 'app_password_id',
         ],
+        'v_portal_release_requests' => [
+            'id', 'quarantine_item_id', 'mailbox_id', 'token_hash', 'status', 'requested_at', 'decided_at', 'decided_by', 'expires_at',
+        ],
     ];
 
     private int $example;
@@ -837,5 +840,37 @@ final class PolicyViewsTest extends DbTestCase
         );
         $this->assertSame(['dav unknown', 'portal mailbox'], $this->col("SELECT CONCAT(service, ' ', subject_type) FROM v_portal_login_events"));
         $this->assertSame(4, (int) $this->scalar('SELECT COUNT(*) FROM login_events'));
+    }
+
+    /** Release stays admin-only (spec 17.7): the portal may only turn an offer into a request. */
+    public function test_portal_release_requests_only_offered_or_requested(): void
+    {
+        $this->exec(
+            'INSERT INTO quarantine_items (queue_id, domain_id, envelope_from, envelope_to, score, reason, size_bytes) '
+            . "VALUES ('Q1', ?, 'spam@evil.test', 'alice@example.com', 11.5, 'BAYES_SPAM', 1234)",
+            [$this->example]
+        );
+        $insert = 'INSERT INTO release_requests (quarantine_item_id, mailbox_id, token_hash, status, expires_at) '
+            . "VALUES ((SELECT id FROM quarantine_items WHERE queue_id = 'Q1'), ?, ?, ?, UTC_TIMESTAMP() + INTERVAL 7 DAY)";
+        $offered = hash('sha256', 'offered');
+        $this->exec($insert, [$this->alice, $offered, 'offered']);
+        $this->exec($insert, [$this->alice, hash('sha256', 'rejected'), 'rejected']);
+
+        $this->exec(
+            "UPDATE v_portal_release_requests SET status = 'requested', requested_at = UTC_TIMESTAMP() WHERE token_hash = ?",
+            [$offered]
+        );
+        foreach (['approved', 'rejected', 'expired'] as $decision) {
+            $this->assertSqlError(
+                self::CHECK_OPTION_FAILED,
+                'UPDATE v_portal_release_requests SET status = ? WHERE token_hash = ?',
+                [$decision, $offered]
+            );
+        }
+
+        // A decided request is out of the portal's reach: it cannot be reopened.
+        $this->exec("UPDATE v_portal_release_requests SET status = 'requested' WHERE status = 'rejected'");
+        $this->assertSame(['rejected', 'requested'], $this->col('SELECT status FROM release_requests'));
+        $this->assertSame(['requested'], $this->col('SELECT status FROM v_portal_release_requests'));
     }
 }

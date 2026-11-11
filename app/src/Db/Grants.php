@@ -312,9 +312,11 @@ final class Grants
             ...self::ownRows($db, 'sieve_rules'),
             ...self::ownRows($db, 'spam_sender_lists'),
             self::grant(self::ALL_ROW_PRIVILEGES, $db, 'vacation_settings'),
-            // A release request is turned from 'offered' into 'requested'; an admin decides it.
+            // A release request is turned from 'offered' into 'requested' only through the view of
+            // 0014, whose CHECK OPTION refuses any other status: an admin decides it.
             self::grant('SELECT', $db, 'release_requests'),
-            self::grant(self::columns('UPDATE', ['status', 'requested_at']), $db, 'release_requests'),
+            self::grant('SELECT', $db, 'v_portal_release_requests'),
+            self::grant(self::columns('UPDATE', ['status', 'requested_at']), $db, 'v_portal_release_requests'),
             // A quota request is created pending; an admin decides it.
             self::grant('SELECT', $db, 'quota_requests'),
             self::grant(self::columns('INSERT', ['mailbox_id', 'requested_mb', 'note']), $db, 'quota_requests'),
