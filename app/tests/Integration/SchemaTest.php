@@ -9,7 +9,7 @@ use PDOException;
 use PDOStatement;
 
 /**
- * The 23 base tables of migrations 0001 to 0004: constraints, cascades and seed data.
+ * The base tables of migrations 0001 to 0004 and 0007 to 0012: constraints, cascades and seed data.
  *
  * Constraint failures are asserted on MariaDB's error number (PDOException::errorInfo[1]):
  * 4025 for a failed CHECK, 1062 for a duplicate key and 1451 for a blocked delete. For a
@@ -33,7 +33,9 @@ final class SchemaTest extends DbTestCase
         'admins',
         'alias_targets',
         'aliases',
+        'app_passwords',
         'audit_log',
+        'delivery_events',
         'deployments',
         'dkim_keys',
         'domain_aliases',
@@ -45,13 +47,17 @@ final class SchemaTest extends DbTestCase
         'list_owners',
         'list_sender_rules',
         'lists',
+        'log_cursors',
+        'login_events',
         'mailboxes',
         'otp_codes',
         'quarantine_items',
+        'recovery_codes',
         'role_permissions',
         'roles',
         'sessions',
         'settings',
+        'totp_secrets',
     ];
 
     protected function setUp(): void
@@ -149,7 +155,7 @@ final class SchemaTest extends DbTestCase
         )->fetchAll(PDO::FETCH_COLUMN);
         sort($names);
 
-        $this->assertCount(23, self::TABLES);
+        $this->assertCount(29, self::TABLES);
         $this->assertSame(self::TABLES, $names);
     }
 
@@ -774,6 +780,108 @@ final class SchemaTest extends DbTestCase
             )->fetch(PDO::FETCH_NUM)
         );
         $this->assertSame('testing', $this->scalar('SELECT mta_sts_mode FROM domains WHERE id = ?', [$domainId]));
+    }
+
+    // ---- 0008 / 0009: app passwords, 2FA and activity logs ------------------------
+
+    public function test_app_password_rules(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+        $insert = 'INSERT INTO app_passwords (mailbox_id, name, password_hash) VALUES (?, ?, ?)';
+
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, '', self::HASH_ARGON], 'chk_app_passwords_name_text');
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, "a\nb", self::HASH_ARGON], 'chk_app_passwords_name_text');
+        // Argon2id only: app passwords are new, so there are no bcrypt hashes to carry over.
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            $insert,
+            [$mailbox, 'Phone', self::HASH_BCRYPT],
+            'chk_app_passwords_password_hash_prefix'
+        );
+
+        $id = $this->appPassword($mailbox, 'Thunderbird – laptop');
+        $this->assertSame(
+            [null, null],
+            $this->query('SELECT last_used_at, revoked_at FROM app_passwords WHERE id = ?', [$id])->fetch(PDO::FETCH_NUM)
+        );
+
+        $this->query('DELETE FROM mailboxes WHERE id = ?', [$mailbox]);
+        $this->assertSame(0, (int) $this->scalar('SELECT COUNT(*) FROM app_passwords'));
+    }
+
+    public function test_totp_one_secret_per_subject(): void
+    {
+        $insert = 'INSERT INTO totp_secrets (subject_type, subject_id, secret_enc) VALUES (?, ?, ?)';
+        $this->query($insert, ['mailbox', 1, 'ciphertext-1']);
+        $this->query($insert, ['admin', 1, 'ciphertext-2']);
+
+        $this->assertSqlError(self::DUPLICATE_KEY, $insert, ['mailbox', 1, 'ciphertext-3']);
+        $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM totp_secrets'));
+    }
+
+    public function test_recovery_code_rules(): void
+    {
+        $insert = 'INSERT INTO recovery_codes (subject_type, subject_id, code_hash) VALUES (?, ?, ?)';
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            $insert,
+            ['mailbox', 1, str_repeat('A', 64)],
+            'chk_recovery_codes_code_hash_lc'
+        );
+
+        $hash = hash('sha256', 'abcd-efgh');
+        $this->query($insert, ['mailbox', 1, $hash]);
+        $this->query($insert, ['mailbox', 2, $hash]);
+        $this->query($insert, ['admin', 1, $hash]);
+        $this->assertSqlError(self::DUPLICATE_KEY, $insert, ['mailbox', 1, $hash]);
+    }
+
+    public function test_login_event_rules(): void
+    {
+        $mailbox = $this->mailbox($this->domain('example.com'), 'alice');
+        $app = $this->appPassword($mailbox, 'Phone');
+        $insert = 'INSERT INTO login_events (subject_type, subject_id, login, service, result, ip, country, app_password_id) '
+            . "VALUES ('mailbox', ?, 'alice@example.com', 'imap', 'ok', '203.0.113.5', ?, ?)";
+
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, 'mw', $app], 'chk_login_events_country_format');
+        $this->assertSqlError(self::CHECK_FAILED, $insert, [$mailbox, 'M1', $app], 'chk_login_events_country_format');
+        $this->query($insert, [$mailbox, 'MW', $app]);
+        $this->query($insert, [$mailbox, null, null]);
+
+        // Revoking by deleting the app password keeps the history, without the link.
+        $this->query('DELETE FROM app_passwords WHERE id = ?', [$app]);
+        $this->assertSame(
+            ['MW', null],
+            $this->pdo()->query("SELECT country, app_password_id FROM login_events WHERE country = 'MW'")->fetch(PDO::FETCH_NUM)
+        );
+        $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM login_events WHERE app_password_id IS NULL'));
+    }
+
+    public function test_delivery_event_rules(): void
+    {
+        $domainId = $this->domain('example.com');
+        $insert = 'INSERT INTO delivery_events (queue_id, at, sender, recipient, status, recipient_domain_id) '
+            . "VALUES ('4XyZ1', UTC_TIMESTAMP(3), ?, ?, 'sent', ?)";
+
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            $insert,
+            ['bob@gmail.com', 'Alice@example.com', $domainId],
+            'chk_delivery_events_recipient_lc'
+        );
+        $this->assertSqlError(
+            self::CHECK_FAILED,
+            $insert,
+            ['Bob@Gmail.com', 'alice@example.com', $domainId],
+            'chk_delivery_events_sender_lc'
+        );
+        // A bounce has an empty envelope sender.
+        $this->query($insert, ['', 'alice@example.com', $domainId]);
+        $this->query($insert, ['bob@gmail.com', 'alice@example.com', $domainId]);
+
+        // No foreign key: the delivery history outlives the domain.
+        $this->query('DELETE FROM domains WHERE id = ?', [$domainId]);
+        $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM delivery_events WHERE recipient_domain_id = ?', [$domainId]));
     }
 
     public function test_migrations_rerunnable(): void
