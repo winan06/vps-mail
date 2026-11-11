@@ -29,7 +29,17 @@ final class MailViewsTest extends DbTestCase
         'v_sender_login' => ['sender', 'login'],
         'v_rejected_local' => ['domain_id', 'local_part', 'reason'],
         'v_rejected_recipients' => ['email', 'reason'],
+        'v_app_auth' => ['email', 'password', 'app_password_id'],
+        'v_shared_acl' => ['shared_email', 'shared_maildir', 'member_login', 'rights'],
+        'v_directory' => ['domain', 'email', 'display_name', 'job_title', 'department', 'phone', 'kind'],
     ];
+
+    /**
+     * Views whose text columns are not all ascii_bin, and why. v_directory carries the utf8mb4
+     * profile text of 0007 (display name, job title, department) and the kind enum: it feeds the
+     * read-only address book, never a Postfix or Dovecot lookup.
+     */
+    private const NOT_ASCII_VIEWS = ['v_directory'];
 
     private int $example;
     private int $other;
@@ -141,7 +151,7 @@ final class MailViewsTest extends DbTestCase
      */
     public function test_every_text_column_is_ascii_bin(): void
     {
-        $views = array_keys(self::COLUMNS);
+        $views = array_values(array_diff(array_keys(self::COLUMNS), self::NOT_ASCII_VIEWS));
         $stmt = $this->pdo()->prepare(
             "SELECT CONCAT(table_name, '.', column_name, ' ', collation_name) FROM information_schema.columns "
             . "WHERE table_schema = DATABASE() AND table_name IN ("
@@ -677,6 +687,172 @@ final class MailViewsTest extends DbTestCase
         $this->alias($this->example, 'ops', ['bob@example.com', 'erin@other.org', 'carol@example.com', 'outsider@gmail.com']);
 
         $this->assertSame(['carol@example.com'], $this->logins('ops@example.com'));
+    }
+
+    // ---- 0013: app passwords, shared mailboxes, directory -------------------------
+
+    private int $support;
+    private int $alicePhone;
+    private int $daveLaptop;
+
+    /**
+     * Extra rows for the 0013 tests, on top of buildFixture(), kept out of the step 1 tests:
+     *
+     * - support@example.com: an active shared mailbox. alice may read and send, carol may only
+     *   read, bob (suspended) may read and send, and erin (other.org) may read and send.
+     * - alice has a live app password, dave a revoked one, and dave has require_app_passwords = 1
+     *   (2FA on), so his main password no longer opens IMAP/SMTP.
+     */
+    private function buildSharedFixture(): void
+    {
+        $this->support = $this->sharedMailbox($this->example, 'support');
+        $this->sharedAccess($this->support, $this->alice, true, true);
+        $this->sharedAccess($this->support, $this->carol, true, false);
+        $this->sharedAccess($this->support, $this->bob, true, true);
+        $this->sharedAccess($this->support, $this->erin, true, true);
+
+        $this->alicePhone = $this->appPassword($this->alice, 'Phone');
+        $this->daveLaptop = $this->appPassword($this->dave, 'Laptop', '2026-10-01 00:00:00');
+        $this->setMailbox($this->dave, ['require_app_passwords' => 1]);
+    }
+
+    /** @return list<string> sorted "shared_email member_login" rows */
+    private function sharedAcl(): array
+    {
+        return $this->col("SELECT CONCAT(shared_email, ' ', member_login) FROM v_shared_acl");
+    }
+
+    public function test_v_auth_excludes_app_password_only_mailboxes(): void
+    {
+        $this->buildSharedFixture();
+
+        // dave has 2FA on, support is shared: neither has a main-password login.
+        $this->assertSame(['alice@example.com', 'carol@example.com'], $this->col('SELECT email FROM v_auth'));
+
+        // Turning 2FA off brings the main password back at once.
+        $this->setMailbox($this->dave, ['require_app_passwords' => 0]);
+        $this->assertSame(
+            ['alice@example.com', 'carol@example.com', 'dave@example.com'],
+            $this->col('SELECT email FROM v_auth')
+        );
+    }
+
+    public function test_v_app_auth_only_live_passwords(): void
+    {
+        $this->buildSharedFixture();
+
+        $this->assertSame(
+            [['alice@example.com', '{ARGON2ID}' . self::ARGON, $this->alicePhone]],
+            array_map(
+                static fn (array $row): array => [$row[0], $row[1], (int) $row[2]],
+                $this->pdo()->query('SELECT email, password, app_password_id FROM v_app_auth')->fetchAll(PDO::FETCH_NUM)
+            )
+        );
+
+        // 2FA does not block app passwords: a live one for dave works, his revoked one never does.
+        $daveDesk = $this->appPassword($this->dave, 'Desk');
+        $this->assertSame(
+            [$daveDesk],
+            array_map('intval', $this->col("SELECT app_password_id FROM v_app_auth WHERE email = 'dave@example.com'"))
+        );
+
+        // An app password row on a shared mailbox grants nothing.
+        $this->appPassword($this->support, 'Stray');
+        $this->assertSame([], $this->col("SELECT email FROM v_app_auth WHERE email = 'support@example.com'"));
+
+        // Revoking, suspending the mailbox or suspending the domain takes effect at once.
+        $this->exec('UPDATE app_passwords SET revoked_at = UTC_TIMESTAMP() WHERE id = ?', [$daveDesk]);
+        $this->assertSame([], $this->col("SELECT email FROM v_app_auth WHERE email = 'dave@example.com'"));
+
+        $this->exec("UPDATE mailboxes SET status = 'suspended' WHERE id = ?", [$this->alice]);
+        $this->assertSame([], $this->col('SELECT email FROM v_app_auth'));
+        $this->exec("UPDATE mailboxes SET status = 'active' WHERE id = ?", [$this->alice]);
+        $this->assertSame(['alice@example.com'], $this->col('SELECT email FROM v_app_auth'));
+
+        $this->exec("UPDATE domains SET status = 'suspended' WHERE id = ?", [$this->example]);
+        $this->assertSame([], $this->col('SELECT email FROM v_app_auth'));
+    }
+
+    public function test_v_sender_login_shared_senders(): void
+    {
+        $this->buildSharedFixture();
+
+        // carol can't send, bob is suspended, erin is in another (suspended) domain.
+        $this->assertSame(['alice@example.com'], $this->logins('support@example.com'));
+
+        // The same-domain rule holds on its own: erin's domain active again changes nothing.
+        $this->exec("UPDATE domains SET status = 'active' WHERE id = ?", [$this->other]);
+        $this->assertSame(['alice@example.com'], $this->logins('support@example.com'));
+
+        // can_send decides, and a shared mailbox is never a member that can send.
+        $this->exec('UPDATE shared_access SET can_send = 1 WHERE member_mailbox_id = ?', [$this->carol]);
+        $billing = $this->sharedMailbox($this->example, 'billing');
+        $this->sharedAccess($this->support, $billing, true, true);
+        $this->assertSame(['alice@example.com', 'carol@example.com'], $this->logins('support@example.com'));
+
+        // The shared address never maps to itself: nothing can log in as it.
+        $this->assertSame([], $this->col("SELECT sender FROM v_sender_login WHERE login IN ('support@example.com', 'billing@example.com')"));
+
+        // A suspended shared mailbox has no senders.
+        $this->exec("UPDATE mailboxes SET status = 'suspended' WHERE id = ?", [$this->support]);
+        $this->assertSame([], $this->logins('support@example.com'));
+    }
+
+    public function test_v_shared_acl_rules(): void
+    {
+        $this->buildSharedFixture();
+
+        $this->assertSame(['support@example.com alice@example.com', 'support@example.com carol@example.com'], $this->sharedAcl());
+        $this->assertSame(['example.com/support/'], $this->col('SELECT DISTINCT shared_maildir FROM v_shared_acl'));
+        $this->assertSame(['lrwstie'], $this->col('SELECT DISTINCT rights FROM v_shared_acl'));
+
+        // erin stays out with her domain active again: members must share the domain.
+        $this->exec("UPDATE domains SET status = 'active' WHERE id = ?", [$this->other]);
+        $this->assertSame(['support@example.com alice@example.com', 'support@example.com carol@example.com'], $this->sharedAcl());
+
+        // can_read decides; a personal mailbox on the shared side, or a shared member, grants nothing.
+        $this->exec('UPDATE shared_access SET can_read = 0 WHERE member_mailbox_id = ?', [$this->carol]);
+        $this->sharedAccess($this->dave, $this->alice, true, true);
+        $this->sharedAccess($this->support, $this->sharedMailbox($this->example, 'billing'), true, true);
+        $this->assertSame(['support@example.com alice@example.com'], $this->sharedAcl());
+
+        // Suspending the shared mailbox removes every row.
+        $this->exec("UPDATE mailboxes SET status = 'suspended' WHERE id = ?", [$this->support]);
+        $this->assertSame([], $this->sharedAcl());
+    }
+
+    public function test_v_directory(): void
+    {
+        $this->buildSharedFixture();
+        $this->setMailbox($this->alice, ['display_name' => 'Alice Banda', 'job_title' => 'Accountant', 'phone' => '+265 991 234 567']);
+        $this->setMailbox($this->carol, ['directory_visible' => 0]);
+
+        // bob is suspended, erin's domain is suspended, carol is hidden.
+        $rows = $this->pdo()->query(
+            'SELECT domain, email, display_name, job_title, department, phone, kind FROM v_directory ORDER BY email'
+        )->fetchAll(PDO::FETCH_NUM);
+        $this->assertSame([
+            ['example.com', 'alice@example.com', 'Alice Banda', 'Accountant', null, '+265 991 234 567', 'personal'],
+            ['example.com', 'dave@example.com', 'dave', null, null, null, 'personal'],
+            ['example.com', 'support@example.com', 'support', null, null, null, 'shared'],
+        ], $rows);
+
+        $this->setMailbox($this->carol, ['directory_visible' => 1]);
+        $this->assertContains('carol@example.com', $this->col('SELECT email FROM v_directory'));
+        $this->exec("UPDATE mailboxes SET status = 'suspended' WHERE id = ?", [$this->support]);
+        $this->assertNotContains('support@example.com', $this->col('SELECT email FROM v_directory'));
+    }
+
+    public function test_shared_mailbox_receives_mail(): void
+    {
+        $this->buildSharedFixture();
+
+        $this->assertContains('support@example.com', $this->col('SELECT email FROM v_mailboxes'));
+        // Like any mailbox without forwarding, its only alias row is the identity row.
+        $this->assertSame(['support@example.com'], $this->destinations('support@example.com'));
+        $this->assertSame([], $this->col("SELECT email FROM v_rejected_recipients WHERE email LIKE 'support@%'"));
+        // It is also reachable at the alias domain, like every local address.
+        $this->assertSame(['support@example.com'], $this->destinations('support@example.net'));
     }
 
     // ---- suspension takes effect at once -----------------------------------------
