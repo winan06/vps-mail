@@ -239,6 +239,15 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mail_portal', 'SELECT * FROM v_portal_recovery_codes', true);
         $add('mail_portal', 'SELECT * FROM login_events', false);
         $add('mail_portal', 'SELECT * FROM v_portal_login_events', true);
+        $add('mail_portal', 'INSERT INTO v_portal_login_events (subject_type, subject_id, login, service, result, ip) '
+            . "VALUES ('mailbox', $alice, 'alice@example.com', 'portal', 'ok', '192.0.2.1')", true);
+        // Login history cannot be back-dated by the portal or the admin app; only log ingest sets `at`.
+        $add('mail_portal', 'INSERT INTO v_portal_login_events (at, subject_type, subject_id, login, service, result, ip) '
+            . "VALUES ('2020-01-01', 'mailbox', $alice, 'alice@example.com', 'portal', 'ok', '192.0.2.1')", false);
+        $add('mail_portal', 'SELECT * FROM v_portal_activity', true);
+        $add('mail_portal', "UPDATE v_portal_activity SET ip = '192.0.2.9'", false);
+        $add('mail_portal', 'DELETE FROM v_portal_activity', false);
+        $add('mail_ro', 'SELECT * FROM v_portal_activity', false);
         $add('mail_portal', "INSERT INTO sieve_rules $sieveRule", true);
         $add('mail_portal', 'INSERT INTO sieve_rules (id, mailbox_id, position, match_field, match_type, match_value, action) '
             . "VALUES (99, $alice, 1, 'subject', 'contains', 'x', 'flag')", false);
@@ -259,6 +268,11 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mailctl', "INSERT INTO login_events $loginEvent", true);
         $add('mailctl', "INSERT INTO login_events (id, subject_type, login, service, result, ip) VALUES (99, 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
         $add('mailctl', 'DELETE FROM login_events', true);
+        $add('mailctl', "INSERT INTO login_events (at, subject_type, login, service, result, ip) VALUES ('2026-11-01 08:00:00', 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", true);
+        // mailbox_archive removes a deleted mailbox's 2FA rows, which have no foreign key.
+        $add('mailctl', 'DELETE FROM totp_secrets', true);
+        $add('mailctl', 'DELETE FROM recovery_codes', true);
+        $add('mailctl', "UPDATE totp_secrets SET confirmed_at = NULL", false);
         $add('mailctl', 'UPDATE migration_jobs SET password_enc = NULL', true);
         $add('mailctl', "UPDATE migration_jobs SET host = 'x.com'", false);
         $add('mailctl', "INSERT INTO deployments (job_type, payload, requested_by_type) VALUES ('retention_sweep', '{}', 'system')", true);
@@ -272,6 +286,7 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mail_app', 'SELECT * FROM delivery_events', true);
         $add('mail_app', 'DELETE FROM delivery_events', false);
         $add('mail_app', "INSERT INTO login_events $loginEvent", true);
+        $add('mail_app', "INSERT INTO login_events (at, subject_type, login, service, result, ip) VALUES ('2020-01-01', 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
         $add('mail_app', "INSERT INTO login_events (id, subject_type, login, service, result, ip) VALUES (99, 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
         $add('mail_app', "INSERT INTO app_passwords (mailbox_id, name, password_hash) VALUES ($alice, 'Phone', $appPassword)", true);
         $add('mail_app', "INSERT INTO app_passwords (id, mailbox_id, name, password_hash) VALUES (99, $alice, 'Phone', $appPassword)", false);

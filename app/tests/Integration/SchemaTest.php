@@ -965,6 +965,12 @@ final class SchemaTest extends DbTestCase
             'folder with a backslash' => [['action' => 'move', 'folder' => 'a\\b'], $folder],
             'folder with a newline' => [['action' => 'move', 'folder' => "a\nb"], $folder],
             'folder empty' => [['action' => 'move', 'folder' => ''], $folder],
+            'folder with a leading .. segment' => [['action' => 'move', 'folder' => '../bob'], $folder],
+            'folder with an inner .. segment' => [['action' => 'move', 'folder' => 'a/../b'], $folder],
+            'folder with a leading space' => [['action' => 'move', 'folder' => ' x'], $folder],
+            'folder with a trailing space' => [['action' => 'move', 'folder' => 'x '], $folder],
+            'folder with a * wildcard' => [['action' => 'move', 'folder' => 'a*b'], $folder],
+            'folder with a % wildcard' => [['action' => 'move', 'folder' => 'a%b'], $folder],
             'move without a folder' => [['action' => 'move'], 'chk_sieve_rules_folder_by_action'],
             'flag with a folder' => [['action' => 'flag', 'folder' => 'Work'], 'chk_sieve_rules_folder_by_action'],
             'header rule without a header name' => [['match_field' => 'header'], 'chk_sieve_rules_header_name_by_field'],
@@ -983,12 +989,13 @@ final class SchemaTest extends DbTestCase
             ['position' => 3, 'match_field' => 'to_cc', 'match_value' => 'team@', 'action' => 'mark_read'],
             ['position' => 4, 'match_value' => 'Rechnung für März', 'action' => 'move', 'folder' => 'Rechnungen ü'],
             ['position' => 5, 'match_value' => 'newsletter', 'action' => 'stop'],
+            ['position' => 6, 'match_value' => 'release', 'action' => 'move', 'folder' => 'Projects/2026 Q1.v2'],
         ];
         foreach ($rows as $row) {
             $this->query(self::SIEVE_INSERT, $this->sieveRow($mailbox, $row));
         }
 
-        $this->assertSame(5, (int) $this->scalar('SELECT COUNT(*) FROM sieve_rules WHERE active = 1'));
+        $this->assertSame(6, (int) $this->scalar('SELECT COUNT(*) FROM sieve_rules WHERE active = 1'));
         $this->assertSqlError(self::DUPLICATE_KEY, self::SIEVE_INSERT, $this->sieveRow($mailbox, ['position' => 3]));
 
         $this->query('DELETE FROM mailboxes WHERE id = ?', [$mailbox]);
@@ -1001,7 +1008,7 @@ final class SchemaTest extends DbTestCase
         $mailbox = $this->mailbox($domainId, 'alice');
         $insert = 'INSERT INTO vacation_settings (mailbox_id, starts_at, ends_at, subject, body, interval_days, time_zone) '
             . 'VALUES (?, ?, ?, ?, ?, ?, ?)';
-        $ok = [$mailbox, '2026-12-20 00:00:00', '2027-01-05 00:00:00', 'Out of office', "Back on 5 January.\nRegards", 7, 'Africa/Blantyre'];
+        $ok = [$mailbox, '2026-12-20 00:00:00', '2027-01-05 00:00:00', 'Out of office', "Back on 5 January.\r\n\tRegards", 7, 'Africa/Blantyre'];
         $bad = function (int $index, mixed $value, string $constraint) use ($insert, $ok): void {
             $this->assertSqlError(self::CHECK_FAILED, $insert, array_replace($ok, [$index => $value]), $constraint);
         };
@@ -1012,6 +1019,10 @@ final class SchemaTest extends DbTestCase
         $bad(3, "a\nb", 'chk_vacation_settings_subject_text');
         $bad(4, '', 'chk_vacation_settings_body_length');
         $bad(4, str_repeat('a', 4097), 'chk_vacation_settings_body_length');
+        // Plain text: tab, newline and carriage return only, so no NUL or other control character.
+        $bad(4, "a\0b", 'chk_vacation_settings_body_text');
+        $bad(4, "bell\x07", 'chk_vacation_settings_body_text');
+        $bad(4, "delete\x7f", 'chk_vacation_settings_body_text');
         $bad(5, 0, 'chk_vacation_settings_interval_range');
         $bad(5, 31, 'chk_vacation_settings_interval_range');
         $bad(6, 'x;y', 'chk_vacation_settings_time_zone_format');
@@ -1099,6 +1110,18 @@ final class SchemaTest extends DbTestCase
         );
         $this->query("UPDATE migration_jobs SET status = 'done', password_enc = NULL WHERE id = ?", [$job]);
         $this->assertSame(2, (int) $this->scalar("SELECT COUNT(*) FROM migration_jobs WHERE status = 'done'"));
+    }
+
+    /** A reporter's report ids are opaque: two that differ only in case are two reports. */
+    public function test_dmarc_report_ids_are_exact(): void
+    {
+        $insert = 'INSERT INTO dmarc_reports (org_name, report_id, policy_domain, date_begin, date_end) '
+            . 'VALUES (?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())';
+        $this->query($insert, ['google.com', 'AbC123', 'example.com']);
+        $this->query($insert, ['google.com', 'abc123', 'example.com']);
+
+        $this->assertSqlError(self::DUPLICATE_KEY, $insert, ['google.com', 'AbC123', 'example.com']);
+        $this->assertSame(2, (int) $this->scalar('SELECT COUNT(*) FROM dmarc_reports'));
     }
 
     public function test_job_types_and_settings(): void

@@ -6,6 +6,9 @@
 -- would leave it. The portal never gets a grant on totp_secrets, recovery_codes or
 -- login_events themselves (Grants::mailPortal), so it can never read, create or change an
 -- admin's 2FA secret, recovery code or login history.
+--
+-- Re-running every migration recreates the 0006 version of v_portal_deployments first; stop
+-- the portal before a full re-run (see 0013).
 
 -- Redefines the 0006 view. The portal may queue three jobs, each for one mailbox: doveadm_kick
 -- (sign out everywhere, a revoked app password), sieve_compile (rules and out-of-office) and
@@ -93,3 +96,22 @@ SELECT
 FROM release_requests r
 WHERE r.status IN ('offered', 'requested')
 WITH CASCADED CHECK OPTION;
+
+-- "Recent activity" in the portal (spec 17.6): every login event tied to a mailbox, for every
+-- service (IMAP, SMTP, portal, CardDAV), successful or not. Events that name no account and
+-- admin logins stay out. The portal only reads this view (SELECT grant, no CHECK OPTION
+-- needed) and shows a user the rows of their own mailbox.
+CREATE OR REPLACE VIEW v_portal_activity AS
+SELECT
+    e.id AS id,
+    e.at AS at,
+    e.subject_id AS subject_id,
+    e.login AS login,
+    e.service AS service,
+    e.result AS result,
+    e.ip AS ip,
+    e.country AS country,
+    e.client AS client,
+    e.app_password_id AS app_password_id
+FROM login_events e
+WHERE e.subject_type = 'mailbox';

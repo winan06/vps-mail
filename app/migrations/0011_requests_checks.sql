@@ -55,13 +55,14 @@ CREATE TABLE IF NOT EXISTS domain_checks (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- DMARC aggregate reports received at dmarc-reports@PRIMARY_DOMAIN, one row per report.
--- A reporter's report id is unique, so the same report delivered twice is stored once.
+-- A reporter's report id is unique, so the same report delivered twice is stored once. The id
+-- is opaque and compared exactly (utf8mb4_bin): ids that differ only in case are two reports.
 -- domain_id is the hosted domain the report is about; it has no foreign key, so the
 -- history outlives the domain until the retention setting removes it.
 CREATE TABLE IF NOT EXISTS dmarc_reports (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     org_name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-    report_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    report_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     policy_domain VARCHAR(253) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     domain_id INT UNSIGNED NULL,
     date_begin DATETIME NOT NULL,

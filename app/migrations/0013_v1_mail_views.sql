@@ -7,6 +7,10 @@
 -- redefined here and replace the 0005 versions; v_mailboxes, v_aliases and v_rejected_* are
 -- unchanged and already cover shared mailboxes like any other mailbox.
 --
+-- Re-running every migration (schema_migrations cleared) recreates the 0005 versions first, so
+-- until this file runs again v_auth briefly lists 2FA and shared mailboxes. Stop Postfix,
+-- Dovecot and the portal before a full re-run; a normal migrate only applies new files.
+--
 -- A shared mailbox (kind 'shared') never logs in: it is left out of v_auth, v_app_auth and the
 -- send-as-itself branch of v_sender_login. Its members reach it through shared_access, and
 -- only when the shared mailbox and the member are both active, in the same domain, and of

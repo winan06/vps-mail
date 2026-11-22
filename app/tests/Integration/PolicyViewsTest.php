@@ -842,6 +842,38 @@ final class PolicyViewsTest extends DbTestCase
         $this->assertSame(4, (int) $this->scalar('SELECT COUNT(*) FROM login_events'));
     }
 
+    /**
+     * "Recent activity" (spec 17.6): every login event tied to a mailbox, whatever the service.
+     * Events that name no account and admin logins stay out. The portal only reads this view.
+     */
+    public function test_portal_activity_shows_own_logins_of_every_service(): void
+    {
+        $this->assertSame(
+            ['id', 'at', 'subject_id', 'login', 'service', 'result', 'ip', 'country', 'client', 'app_password_id'],
+            $this->pdo()->query(
+                'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() '
+                . "AND table_name = 'v_portal_activity' ORDER BY ordinal_position"
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+
+        $this->exec(
+            'INSERT INTO login_events (subject_type, subject_id, login, service, result, ip) VALUES '
+            . "('mailbox', ?, 'alice@example.com', 'imap', 'ok', '192.0.2.1'), "
+            . "('mailbox', ?, 'alice@example.com', 'smtp', 'fail', '192.0.2.2'), "
+            . "('mailbox', ?, 'carol@example.com', 'dav', 'ok', '192.0.2.3'), "
+            . "('mailbox', ?, 'alice@example.com', 'portal', 'ok', '192.0.2.4'), "
+            . "('unknown', NULL, 'alice@example.com', 'portal', 'fail', '192.0.2.5'), "
+            . "('admin', 1, 'root', 'admin', 'ok', '192.0.2.6')",
+            [$this->alice, $this->alice, $this->carol, $this->alice]
+        );
+
+        $this->assertSame(
+            ['192.0.2.1 imap', '192.0.2.2 smtp', '192.0.2.3 dav', '192.0.2.4 portal'],
+            $this->col("SELECT CONCAT(ip, ' ', service) FROM v_portal_activity")
+        );
+        $this->assertSame(3, (int) $this->scalar('SELECT COUNT(*) FROM v_portal_activity WHERE subject_id = ?', [$this->alice]));
+    }
+
     /** Release stays admin-only (spec 17.7): the portal may only turn an offer into a request. */
     public function test_portal_release_requests_only_offered_or_requested(): void
     {

@@ -3,6 +3,11 @@
 -- History tables have no foreign key to domains or mailboxes, so a row outlives what it
 -- describes; the retention settings of 0012 decide when rows go. Every ascii column is
 -- ascii_bin, so the case-sensitive CHECKs below compare bytes.
+--
+-- For log ingest (step 4): logins and addresses in the logs are chosen by whoever connects, so
+-- they can be too long for these columns or carry uppercase that PHP 8's ASCII-only
+-- strtolower() leaves alone. Ingest lowercases and cuts them in SQL (LEFT(LOWER(?), 254)) and
+-- skips a line that still fails a CHECK, rather than stopping and leaving the cursor behind.
 
 -- One row per login attempt. login is what was typed, so it may name no account at all
 -- (subject_type 'unknown'). country is the ISO 3166 code from the DB-IP Lite database, in

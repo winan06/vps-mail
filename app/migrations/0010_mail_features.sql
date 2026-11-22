@@ -8,7 +8,10 @@
 
 -- The portal's rule builder, one row per rule, applied in position order. A header rule names
 -- its header, and only a header rule does. A move rule names its folder, and only a move rule
--- does; folders are relative to the mailbox root, so they never start with "/".
+-- does. Folders are relative to the mailbox root: they never start with "/", never contain
+-- "..", never start or end with a space, and hold no IMAP wildcard ("*" or "%").
+-- Dovecot's own mailbox-name checks and ACLs stay the real barrier; these keep the
+-- generated script and the folder list predictable.
 CREATE TABLE IF NOT EXISTS sieve_rules (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     mailbox_id INT UNSIGNED NOT NULL,
@@ -26,13 +29,20 @@ CREATE TABLE IF NOT EXISTS sieve_rules (
     CONSTRAINT chk_sieve_rules_header_name_format CHECK (header_name REGEXP '^[A-Za-z0-9-]{1,64}\\z'),
     CONSTRAINT chk_sieve_rules_header_name_by_field CHECK ((match_field = 'header') = (header_name IS NOT NULL)),
     CONSTRAINT chk_sieve_rules_match_value_text CHECK (match_value <> '' AND match_value NOT REGEXP '[[:cntrl:]"\\\\]'),
-    CONSTRAINT chk_sieve_rules_folder_text CHECK (folder <> '' AND folder NOT REGEXP '[[:cntrl:]"\\\\]' AND folder NOT LIKE '/%'),
+    CONSTRAINT chk_sieve_rules_folder_text CHECK (
+        folder <> ''
+        AND folder NOT REGEXP '[[:cntrl:]"\\\\*%]'
+        AND folder NOT REGEXP '^ | $'
+        AND folder NOT LIKE '%..%'
+        AND folder NOT LIKE '/%'
+    ),
     CONSTRAINT chk_sieve_rules_folder_by_action CHECK ((action = 'move') = (folder IS NOT NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- One out-of-office setting per mailbox. Times are UTC; time_zone is the IANA zone the user
 -- entered them in, kept so the portal can show them back. body is plain text, 1 to 4096
--- characters. interval_days is how long before the same sender gets another reply.
+-- characters, with tab, newline and carriage return as its only control characters.
+-- interval_days is how long before the same sender gets another reply.
 -- subject and body may hold quotes, so sieve_compile must escape them as Sieve strings.
 CREATE TABLE IF NOT EXISTS vacation_settings (
     mailbox_id INT UNSIGNED NOT NULL,
@@ -49,6 +59,7 @@ CREATE TABLE IF NOT EXISTS vacation_settings (
     CONSTRAINT chk_vacation_settings_dates_ordered CHECK (starts_at IS NULL OR ends_at IS NULL OR ends_at > starts_at),
     CONSTRAINT chk_vacation_settings_subject_text CHECK (subject <> '' AND subject NOT REGEXP '[[:cntrl:]]'),
     CONSTRAINT chk_vacation_settings_body_length CHECK (CHAR_LENGTH(body) BETWEEN 1 AND 4096),
+    CONSTRAINT chk_vacation_settings_body_text CHECK (body NOT REGEXP '[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]'),
     CONSTRAINT chk_vacation_settings_interval_range CHECK (interval_days BETWEEN 1 AND 30),
     CONSTRAINT chk_vacation_settings_time_zone_format CHECK (time_zone REGEXP '^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*\\z')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

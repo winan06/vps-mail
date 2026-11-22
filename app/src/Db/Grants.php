@@ -147,6 +147,14 @@ final class Grants
         ],
     ];
 
+    /**
+     * The login_events columns the portal and the admin application may set: every column but
+     * id and `at`, so neither can back-date a login. Only mailctl's log ingest sets `at`.
+     */
+    private const LOGIN_EVENT_COLUMNS_NO_AT = [
+        'subject_type', 'subject_id', 'login', 'service', 'result', 'ip', 'country', 'client', 'app_password_id',
+    ];
+
     /** History tables the admin application may read but not change. */
     private const APP_READ_ONLY = ['login_events', 'delivery_events', 'dmarc_reports', 'dmarc_records', 'domain_checks'];
 
@@ -233,7 +241,7 @@ final class Grants
         return [
             ...$statements,
             ...self::onEach('SELECT', $db, self::APP_READ_ONLY),
-            self::withoutId('INSERT', $db, 'login_events'),
+            self::grant(self::columns('INSERT', self::LOGIN_EVENT_COLUMNS_NO_AT), $db, 'login_events'),
             self::grant('SELECT', $db, 'audit_log'),
             self::auditInsert($db),
         ];
@@ -287,7 +295,8 @@ final class Grants
             ),
             self::grant(self::columns('UPDATE', ['attempts', 'used_at']), $db, 'v_portal_otp_codes'),
             // Queue-only: the portal can add a job but never read, change or delete one. The view's
-            // CHECK OPTION limits the job to doveadm_kick requested by a named mailbox.
+            // CHECK OPTION (0014) limits it to doveadm_kick, sieve_compile or spam_lists, requested by
+            // a named mailbox, with a payload of exactly {"mailbox_id": <that mailbox>}.
             self::grant(
                 self::columns('INSERT', ['job_type', 'payload', 'requested_by_type', 'requested_by_id']),
                 $db,
@@ -305,7 +314,9 @@ final class Grants
             self::grant(self::columns('INSERT', ['subject_type', 'subject_id', 'code_hash']), $db, 'v_portal_recovery_codes'),
             self::grant(self::columns('UPDATE', ['used_at']), $db, 'v_portal_recovery_codes'),
             self::grant('SELECT', $db, 'v_portal_login_events'),
-            self::grant(self::columns('INSERT', self::ID_TABLE_COLUMNS['login_events']), $db, 'v_portal_login_events'),
+            self::grant(self::columns('INSERT', self::LOGIN_EVENT_COLUMNS_NO_AT), $db, 'v_portal_login_events'),
+            // "Recent activity": every login event of a mailbox, read-only.
+            self::grant('SELECT', $db, 'v_portal_activity'),
             // The address book, and the shared mailboxes a user belongs to.
             ...self::onEach('SELECT', $db, ['v_directory', 'shared_access']),
             // Mail rules and spam lists: the user's own rows, every column but id.
@@ -340,6 +351,10 @@ final class Grants
             self::grant('INSERT, UPDATE', $db, 'dkim_keys'),
             self::grant('DELETE', $db, 'mailboxes'),
             self::grant('DELETE', $db, 'domains'),
+            // mailbox_archive also removes the mailbox's 2FA secret and recovery codes, which
+            // have no foreign key to cascade from.
+            self::grant('DELETE', $db, 'totp_secrets'),
+            self::grant('DELETE', $db, 'recovery_codes'),
             // Follow-up jobs, such as domain_check after a DNS change.
             self::grant(self::columns('INSERT', ['job_type', 'payload', 'requested_by_type', 'requested_by_id']), $db, 'deployments'),
             // Log ingest and retention.

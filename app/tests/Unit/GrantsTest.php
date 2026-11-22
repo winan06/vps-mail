@@ -81,6 +81,10 @@ final class GrantsTest extends TestCase
     private const LOGIN_EVENT_COLUMNS = '`at`, `subject_type`, `subject_id`, `login`, `service`, `result`, `ip`, `country`, '
         . '`client`, `app_password_id`';
 
+    /** login_events columns the portal and the admin app may set: not `at`, so no back-dating. */
+    private const LOGIN_EVENT_COLUMNS_NO_AT = '`subject_type`, `subject_id`, `login`, `service`, `result`, `ip`, `country`, '
+        . '`client`, `app_password_id`';
+
     private const SIEVE_COLUMNS = '`mailbox_id`, `position`, `active`, `match_field`, `header_name`, `match_type`, '
         . '`match_value`, `action`, `folder`';
 
@@ -170,7 +174,7 @@ final class GrantsTest extends TestCase
         foreach (self::APP_READ_ONLY as $table) {
             $expected[] = "GRANT SELECT ON `mailhost`.`$table`";
         }
-        $expected[] = 'GRANT INSERT (' . self::LOGIN_EVENT_COLUMNS . ') ON `mailhost`.`login_events`';
+        $expected[] = 'GRANT INSERT (' . self::LOGIN_EVENT_COLUMNS_NO_AT . ') ON `mailhost`.`login_events`';
         $expected[] = 'GRANT SELECT ON `mailhost`.`audit_log`';
         $expected[] = 'GRANT INSERT (' . self::AUDIT_COLUMNS . ') ON `mailhost`.`audit_log`';
 
@@ -210,7 +214,8 @@ final class GrantsTest extends TestCase
             'GRANT INSERT (`subject_type`, `subject_id`, `code_hash`) ON `mailhost`.`v_portal_recovery_codes`',
             'GRANT UPDATE (`used_at`) ON `mailhost`.`v_portal_recovery_codes`',
             'GRANT SELECT ON `mailhost`.`v_portal_login_events`',
-            'GRANT INSERT (' . self::LOGIN_EVENT_COLUMNS . ') ON `mailhost`.`v_portal_login_events`',
+            'GRANT INSERT (' . self::LOGIN_EVENT_COLUMNS_NO_AT . ') ON `mailhost`.`v_portal_login_events`',
+            'GRANT SELECT ON `mailhost`.`v_portal_activity`',
             'GRANT SELECT ON `mailhost`.`v_directory`',
             'GRANT SELECT ON `mailhost`.`shared_access`',
             'GRANT SELECT, DELETE ON `mailhost`.`sieve_rules`',
@@ -252,6 +257,8 @@ final class GrantsTest extends TestCase
             'GRANT INSERT, UPDATE ON `mailhost`.`dkim_keys`',
             'GRANT DELETE ON `mailhost`.`mailboxes`',
             'GRANT DELETE ON `mailhost`.`domains`',
+            'GRANT DELETE ON `mailhost`.`totp_secrets`',
+            'GRANT DELETE ON `mailhost`.`recovery_codes`',
             'GRANT INSERT (`job_type`, `payload`, `requested_by_type`, `requested_by_id`) ON `mailhost`.`deployments`',
             'GRANT INSERT (' . self::LOGIN_EVENT_COLUMNS . ') ON `mailhost`.`login_events`',
             'GRANT DELETE ON `mailhost`.`login_events`',
