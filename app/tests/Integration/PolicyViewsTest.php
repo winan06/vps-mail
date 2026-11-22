@@ -47,6 +47,14 @@ final class PolicyViewsTest extends DbTestCase
             'id', 'subject_type', 'subject_id', 'purpose', 'code_hmac', 'target', 'expires_at', 'attempts', 'used_at',
             'request_ip', 'created_at',
         ],
+        'v_portal_totp_secrets' => ['subject_type', 'subject_id', 'secret_enc', 'confirmed_at', 'last_used_step', 'created_at'],
+        'v_portal_recovery_codes' => ['id', 'subject_type', 'subject_id', 'code_hash', 'used_at', 'created_at'],
+        'v_portal_login_events' => [
+            'id', 'at', 'subject_type', 'subject_id', 'login', 'service', 'result', 'ip', 'country', 'client', 'app_password_id',
+        ],
+        'v_portal_release_requests' => [
+            'id', 'quarantine_item_id', 'mailbox_id', 'token_hash', 'status', 'requested_at', 'decided_at', 'decided_by', 'expires_at',
+        ],
     ];
 
     private int $example;
@@ -544,7 +552,7 @@ final class PolicyViewsTest extends DbTestCase
     {
         $types = [
             'dkim_generate', 'rspamd_policy', 'quarantine_release', 'quarantine_delete',
-            'domain_archive', 'mailbox_archive', 'retention_sweep',
+            'domain_archive', 'mailbox_archive', 'retention_sweep', 'domain_certs', 'imap_migrate', 'domain_check',
         ];
 
         return array_combine($types, array_map(static fn (string $t): array => [$t], $types));
@@ -728,5 +736,173 @@ final class PolicyViewsTest extends DbTestCase
         $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_otp_codes SET subject_type = 'admin'");
 
         $this->assertSame(['mailbox'], $this->col('SELECT subject_type FROM otp_codes'));
+    }
+
+    // ---- 0014: per-mailbox jobs, 2FA secrets, recovery codes, login events ---------
+
+    private function mailboxPayload(int $mailboxId): string
+    {
+        return json_encode(['mailbox_id' => $mailboxId], JSON_THROW_ON_ERROR);
+    }
+
+    public function test_portal_job_payload_must_match_requester(): void
+    {
+        $alice = $this->alice;
+        foreach (['doveadm_kick', 'sieve_compile', 'spam_lists'] as $type) {
+            $this->exec(self::KICK, [$type, $this->mailboxPayload($alice), 'mailbox', $alice]);
+        }
+        // Whitespace does not matter, only the JSON value.
+        $this->exec(self::KICK, ['spam_lists', '{ "mailbox_id" : ' . $alice . ' }', 'mailbox', $alice]);
+        $this->assertSame(4, $this->deploymentCount());
+
+        $bad = [
+            'another mailbox' => ['sieve_compile', $this->mailboxPayload($this->carol)],
+            'no mailbox_id' => ['sieve_compile', '{}'],
+            'another key' => ['sieve_compile', '{"mailbox":' . $alice . '}'],
+            // JSON_VALUE reads the first key, PHP's json_decode the last: the job runner would
+            // act on carol's mailbox while the view saw alice's.
+            'duplicate key' => ['sieve_compile', '{"mailbox_id":' . $alice . ',"mailbox_id":' . $this->carol . '}'],
+            'id as a string' => ['sieve_compile', '{"mailbox_id":"' . $alice . '"}'],
+            'id as a fraction' => ['sieve_compile', '{"mailbox_id":' . $alice . '.5}'],
+            'extra key' => ['sieve_compile', '{"mailbox_id":' . $alice . ',"domain_id":1}'],
+            'a list' => ['sieve_compile', '[' . $alice . ']'],
+            'admin job' => ['dkim_generate', $this->mailboxPayload($alice)],
+        ];
+        foreach ($bad as $label => [$type, $payload]) {
+            try {
+                $this->exec(self::KICK, [$type, $payload, 'mailbox', $alice]);
+                $this->fail("Expected error 1369 for: $label");
+            } catch (PDOException $e) {
+                $this->assertSame(self::CHECK_OPTION_FAILED, $e->errorInfo[1] ?? null, "$label: " . $e->getMessage());
+            }
+        }
+
+        // Nor can a queued job be pointed at another mailbox afterwards.
+        $id = (int) $this->scalar("SELECT MIN(id) FROM deployments WHERE job_type = 'sieve_compile'");
+        $this->assertSqlError(
+            self::CHECK_OPTION_FAILED,
+            'UPDATE v_portal_deployments SET payload = ? WHERE id = ?',
+            [$this->mailboxPayload($this->carol), $id]
+        );
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, 'UPDATE v_portal_deployments SET requested_by_id = ? WHERE id = ?', [$this->carol, $id]);
+        $this->assertSame(4, $this->deploymentCount());
+    }
+
+    public function test_portal_totp_views_mailbox_only(): void
+    {
+        $totp = 'INSERT INTO v_portal_totp_secrets (subject_type, subject_id, secret_enc) VALUES (?, ?, ?)';
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, $totp, ['admin', 1, 'ciphertext']);
+        $this->assertSqlError(
+            self::CHECK_OPTION_FAILED,
+            'REPLACE INTO v_portal_totp_secrets (subject_type, subject_id, secret_enc) VALUES (?, ?, ?)',
+            ['admin', 1, 'ciphertext']
+        );
+
+        $this->exec($totp, ['mailbox', $this->alice, 'ciphertext-a']);
+        $this->exec('INSERT INTO totp_secrets (subject_type, subject_id, secret_enc) VALUES (?, ?, ?)', ['admin', 1, 'ciphertext-admin']);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_totp_secrets SET subject_type = 'admin'");
+        $this->exec('UPDATE v_portal_totp_secrets SET confirmed_at = UTC_TIMESTAMP(), last_used_step = 123 WHERE subject_id = ?', [$this->alice]);
+        $this->assertSame(['mailbox 123'], $this->col("SELECT CONCAT(subject_type, ' ', last_used_step) FROM v_portal_totp_secrets"));
+
+        $codes = 'INSERT INTO v_portal_recovery_codes (subject_type, subject_id, code_hash) VALUES (?, ?, ?)';
+        $hash = hash('sha256', 'abcd-efgh');
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, $codes, ['admin', 1, $hash]);
+        $this->exec($codes, ['mailbox', $this->alice, $hash]);
+        $this->exec('INSERT INTO recovery_codes (subject_type, subject_id, code_hash) VALUES (?, ?, ?)', ['admin', 1, $hash]);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_recovery_codes SET subject_type = 'admin'");
+        $this->exec('UPDATE v_portal_recovery_codes SET used_at = UTC_TIMESTAMP() WHERE code_hash = ?', [$hash]);
+        $this->assertSame(['mailbox'], $this->col('SELECT subject_type FROM v_portal_recovery_codes WHERE used_at IS NOT NULL'));
+
+        // Deleting through the views never touches the admin rows.
+        $this->exec('DELETE FROM v_portal_totp_secrets');
+        $this->exec('DELETE FROM v_portal_recovery_codes');
+        $this->assertSame(['admin'], $this->col('SELECT subject_type FROM totp_secrets'));
+        $this->assertSame(['admin'], $this->col('SELECT subject_type FROM recovery_codes'));
+    }
+
+    public function test_portal_login_events_scope(): void
+    {
+        $insert = 'INSERT INTO v_portal_login_events (subject_type, subject_id, login, service, result, ip) VALUES (?, ?, ?, ?, ?, ?)';
+        $this->exec($insert, ['mailbox', $this->alice, 'alice@example.com', 'portal', 'ok', '203.0.113.5']);
+        $this->exec($insert, ['unknown', null, 'nobody@example.com', 'dav', 'fail', '203.0.113.6']);
+
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, $insert, ['mailbox', $this->alice, 'alice@example.com', 'imap', 'ok', '203.0.113.5']);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, $insert, ['mailbox', $this->alice, 'alice@example.com', 'admin', 'ok', '203.0.113.5']);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, $insert, ['admin', 1, 'root', 'portal', 'ok', '203.0.113.5']);
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_login_events SET service = 'imap'");
+        $this->assertSqlError(self::CHECK_OPTION_FAILED, "UPDATE v_portal_login_events SET subject_type = 'admin'");
+
+        // Admin logins and the mail services' own events are not the portal's to see.
+        $this->exec(
+            'INSERT INTO login_events (subject_type, subject_id, login, service, result, ip) VALUES '
+            . "('admin', 1, 'root', 'admin', 'ok', '192.0.2.1'), ('mailbox', ?, 'alice@example.com', 'imap', 'ok', '192.0.2.2')",
+            [$this->alice]
+        );
+        $this->assertSame(['dav unknown', 'portal mailbox'], $this->col("SELECT CONCAT(service, ' ', subject_type) FROM v_portal_login_events"));
+        $this->assertSame(4, (int) $this->scalar('SELECT COUNT(*) FROM login_events'));
+    }
+
+    /**
+     * "Recent activity" (spec 17.6): every login event tied to a mailbox, whatever the service.
+     * Events that name no account and admin logins stay out. The portal only reads this view.
+     */
+    public function test_portal_activity_shows_own_logins_of_every_service(): void
+    {
+        $this->assertSame(
+            ['id', 'at', 'subject_id', 'login', 'service', 'result', 'ip', 'country', 'client', 'app_password_id'],
+            $this->pdo()->query(
+                'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() '
+                . "AND table_name = 'v_portal_activity' ORDER BY ordinal_position"
+            )->fetchAll(PDO::FETCH_COLUMN)
+        );
+
+        $this->exec(
+            'INSERT INTO login_events (subject_type, subject_id, login, service, result, ip) VALUES '
+            . "('mailbox', ?, 'alice@example.com', 'imap', 'ok', '192.0.2.1'), "
+            . "('mailbox', ?, 'alice@example.com', 'smtp', 'fail', '192.0.2.2'), "
+            . "('mailbox', ?, 'carol@example.com', 'dav', 'ok', '192.0.2.3'), "
+            . "('mailbox', ?, 'alice@example.com', 'portal', 'ok', '192.0.2.4'), "
+            . "('unknown', NULL, 'alice@example.com', 'portal', 'fail', '192.0.2.5'), "
+            . "('admin', 1, 'root', 'admin', 'ok', '192.0.2.6')",
+            [$this->alice, $this->alice, $this->carol, $this->alice]
+        );
+
+        $this->assertSame(
+            ['192.0.2.1 imap', '192.0.2.2 smtp', '192.0.2.3 dav', '192.0.2.4 portal'],
+            $this->col("SELECT CONCAT(ip, ' ', service) FROM v_portal_activity")
+        );
+        $this->assertSame(3, (int) $this->scalar('SELECT COUNT(*) FROM v_portal_activity WHERE subject_id = ?', [$this->alice]));
+    }
+
+    /** Release stays admin-only (spec 17.7): the portal may only turn an offer into a request. */
+    public function test_portal_release_requests_only_offered_or_requested(): void
+    {
+        $this->exec(
+            'INSERT INTO quarantine_items (queue_id, domain_id, envelope_from, envelope_to, score, reason, size_bytes) '
+            . "VALUES ('Q1', ?, 'spam@evil.test', 'alice@example.com', 11.5, 'BAYES_SPAM', 1234)",
+            [$this->example]
+        );
+        $insert = 'INSERT INTO release_requests (quarantine_item_id, mailbox_id, token_hash, status, expires_at) '
+            . "VALUES ((SELECT id FROM quarantine_items WHERE queue_id = 'Q1'), ?, ?, ?, UTC_TIMESTAMP() + INTERVAL 7 DAY)";
+        $offered = hash('sha256', 'offered');
+        $this->exec($insert, [$this->alice, $offered, 'offered']);
+        $this->exec($insert, [$this->alice, hash('sha256', 'rejected'), 'rejected']);
+
+        $this->exec(
+            "UPDATE v_portal_release_requests SET status = 'requested', requested_at = UTC_TIMESTAMP() WHERE token_hash = ?",
+            [$offered]
+        );
+        foreach (['approved', 'rejected', 'expired'] as $decision) {
+            $this->assertSqlError(
+                self::CHECK_OPTION_FAILED,
+                'UPDATE v_portal_release_requests SET status = ? WHERE token_hash = ?',
+                [$decision, $offered]
+            );
+        }
+
+        // A decided request is out of the portal's reach: it cannot be reopened.
+        $this->exec("UPDATE v_portal_release_requests SET status = 'requested' WHERE status = 'rejected'");
+        $this->assertSame(['rejected', 'requested'], $this->col('SELECT status FROM release_requests'));
+        $this->assertSame(['requested'], $this->col('SELECT status FROM v_portal_release_requests'));
     }
 }

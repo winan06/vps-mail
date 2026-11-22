@@ -38,7 +38,7 @@ final class GrantsMatrixTest extends DbTestCase
         . "VALUES ('system', NULL, 'grants.test', NULL, NULL, NULL, NULL, NULL)";
 
     private const KICK = 'INSERT INTO v_portal_deployments (job_type, payload, requested_by_type, requested_by_id) '
-        . "VALUES ('doveadm_kick', '{}', 'mailbox', 1)";
+        . "VALUES ('doveadm_kick', '{\"mailbox_id\":1}', 'mailbox', 1)";
 
     /** @var array<string,string> */
     private array $passwords = [];
@@ -209,7 +209,122 @@ final class GrantsMatrixTest extends DbTestCase
         $add('mailctl', "UPDATE audit_log SET action='x'", false);
         $add('mailctl', 'DELETE FROM audit_log', false);
 
+        // ---- version 1 additions (0007 to 0014) ----
+        $alice = "(SELECT id FROM mailboxes WHERE local_part = 'alice')";
+        $appPassword = "'\$argon2id\$v=19\$m=65536,t=4,p=1\$x\$y'";
+        $loginEvent = "(subject_type, login, service, result, ip) VALUES ('unknown', 'x@example.com', 'imap', 'fail', '192.0.2.1')";
+        $sieveRule = "(mailbox_id, position, match_field, match_type, match_value, action) VALUES ($alice, 1, 'subject', 'contains', 'x', 'flag')";
+
+        $add('mail_ro', 'SELECT * FROM v_app_auth', true);
+        $add('mail_ro', 'SELECT * FROM v_shared_acl', true);
+        $add('mail_ro', 'SELECT * FROM app_passwords', false);
+        $add('mail_ro', 'SELECT * FROM v_directory', false);
+        $add('mail_ro', 'SELECT * FROM shared_access', false);
+
+        $add('mail_policy', 'SELECT * FROM v_app_auth', false);
+        $add('mail_policy', 'SELECT * FROM login_events', false);
+
+        $add('mail_portal', "UPDATE mailboxes SET display_name = 'X'", true);
+        $add('mail_portal', 'UPDATE mailboxes SET require_app_passwords = 0', true);
+        $add('mail_portal', "UPDATE mailboxes SET kind = 'shared'", false);
+        $add('mail_portal', 'UPDATE mailboxes SET quota_warned_level = 0', false);
+        $add('mail_portal', "INSERT INTO app_passwords (mailbox_id, name, password_hash) VALUES ($alice, 'Phone', $appPassword)", true);
+        $add('mail_portal', "INSERT INTO app_passwords (id, mailbox_id, name, password_hash) VALUES (99, $alice, 'Phone', $appPassword)", false);
+        $add('mail_portal', 'UPDATE app_passwords SET revoked_at = UTC_TIMESTAMP()', true);
+        $add('mail_portal', "UPDATE app_passwords SET password_hash = $appPassword", false);
+        $add('mail_portal', 'UPDATE app_passwords SET mailbox_id = 1', false);
+        $add('mail_portal', 'SELECT * FROM totp_secrets', false);
+        $add('mail_portal', 'SELECT * FROM v_portal_totp_secrets', true);
+        $add('mail_portal', 'SELECT * FROM recovery_codes', false);
+        $add('mail_portal', 'SELECT * FROM v_portal_recovery_codes', true);
+        $add('mail_portal', 'SELECT * FROM login_events', false);
+        $add('mail_portal', 'SELECT * FROM v_portal_login_events', true);
+        $add('mail_portal', 'INSERT INTO v_portal_login_events (subject_type, subject_id, login, service, result, ip) '
+            . "VALUES ('mailbox', $alice, 'alice@example.com', 'portal', 'ok', '192.0.2.1')", true);
+        // Login history cannot be back-dated by the portal or the admin app; only log ingest sets `at`.
+        $add('mail_portal', 'INSERT INTO v_portal_login_events (at, subject_type, subject_id, login, service, result, ip) '
+            . "VALUES ('2020-01-01', 'mailbox', $alice, 'alice@example.com', 'portal', 'ok', '192.0.2.1')", false);
+        $add('mail_portal', 'SELECT * FROM v_portal_activity', true);
+        $add('mail_portal', "UPDATE v_portal_activity SET ip = '192.0.2.9'", false);
+        $add('mail_portal', 'DELETE FROM v_portal_activity', false);
+        $add('mail_ro', 'SELECT * FROM v_portal_activity', false);
+        $add('mail_portal', "INSERT INTO sieve_rules $sieveRule", true);
+        $add('mail_portal', 'INSERT INTO sieve_rules (id, mailbox_id, position, match_field, match_type, match_value, action) '
+            . "VALUES (99, $alice, 1, 'subject', 'contains', 'x', 'flag')", false);
+        $add('mail_portal', 'DELETE FROM sieve_rules', true);
+        $add('mail_portal', 'SELECT * FROM v_directory', true);
+        $add('mail_portal', 'SELECT * FROM shared_access', true);
+        $add('mail_portal', 'DELETE FROM shared_access', false);
+        $add('mail_portal', 'SELECT * FROM migration_jobs', false);
+        $add('mail_portal', 'SELECT * FROM delivery_events', false);
+        $add('mail_portal', 'SELECT * FROM v_app_auth', false);
+        $add('mail_portal', 'SELECT * FROM release_requests', true);
+        $add('mail_portal', "UPDATE release_requests SET status = 'requested'", false);
+        $add('mail_portal', "UPDATE v_portal_release_requests SET status = 'requested', requested_at = UTC_TIMESTAMP()", true);
+        $add('mail_portal', 'UPDATE v_portal_release_requests SET decided_by = 1', false);
+        $add('mail_portal', "INSERT INTO quota_requests (mailbox_id, requested_mb, note) VALUES ($alice, 2048, 'More please')", true);
+        $add('mail_portal', "INSERT INTO quota_requests (mailbox_id, requested_mb, status) VALUES ($alice, 2048, 'approved')", false);
+
+        $add('mailctl', "INSERT INTO login_events $loginEvent", true);
+        $add('mailctl', "INSERT INTO login_events (id, subject_type, login, service, result, ip) VALUES (99, 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
+        $add('mailctl', 'DELETE FROM login_events', true);
+        $add('mailctl', "INSERT INTO login_events (at, subject_type, login, service, result, ip) VALUES ('2026-11-01 08:00:00', 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", true);
+        // mailbox_archive removes a deleted mailbox's 2FA rows, which have no foreign key.
+        $add('mailctl', 'DELETE FROM totp_secrets', true);
+        $add('mailctl', 'DELETE FROM recovery_codes', true);
+        $add('mailctl', "UPDATE totp_secrets SET confirmed_at = NULL", false);
+        $add('mailctl', 'UPDATE migration_jobs SET password_enc = NULL', true);
+        $add('mailctl', "UPDATE migration_jobs SET host = 'x.com'", false);
+        $add('mailctl', "INSERT INTO deployments (job_type, payload, requested_by_type) VALUES ('retention_sweep', '{}', 'system')", true);
+        $add('mailctl', "INSERT INTO deployments (id, job_type, payload, requested_by_type) VALUES (99, 'retention_sweep', '{}', 'system')", false);
+        $add('mailctl', 'UPDATE app_passwords SET last_used_at = UTC_TIMESTAMP()', true);
+        $add('mailctl', 'UPDATE app_passwords SET revoked_at = UTC_TIMESTAMP()', false);
+        $add('mailctl', 'UPDATE mailboxes SET quota_warned_level = 0', true);
+        $add('mailctl', "INSERT INTO log_cursors (source, cursor_value) VALUES ('postfix', 's=1')", true);
+        $add('mailctl', 'DELETE FROM sieve_rules', false);
+
+        $add('mail_app', 'SELECT * FROM delivery_events', true);
+        $add('mail_app', 'DELETE FROM delivery_events', false);
+        $add('mail_app', "INSERT INTO login_events $loginEvent", true);
+        $add('mail_app', "INSERT INTO login_events (at, subject_type, login, service, result, ip) VALUES ('2020-01-01', 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
+        $add('mail_app', "INSERT INTO login_events (id, subject_type, login, service, result, ip) VALUES (99, 'unknown', 'x', 'imap', 'fail', '192.0.2.1')", false);
+        $add('mail_app', "INSERT INTO app_passwords (mailbox_id, name, password_hash) VALUES ($alice, 'Phone', $appPassword)", true);
+        $add('mail_app', "INSERT INTO app_passwords (id, mailbox_id, name, password_hash) VALUES (99, $alice, 'Phone', $appPassword)", false);
+        $add('mail_app', 'UPDATE app_passwords SET id = 99', false);
+        $add('mail_app', 'DELETE FROM app_passwords', true);
+        $add('mail_app', "UPDATE shared_access SET can_send = 1", true);
+        $add('mail_app', 'SELECT * FROM log_cursors', false);
+        $add('mail_app', 'SELECT * FROM v_portal_login_events', false);
+
         return $rows;
+    }
+
+    /**
+     * Grants::ID_TABLE_COLUMNS lists, for each table with an AUTO_INCREMENT id that a service
+     * writes, every column except id, in table order. A column added to a table without being
+     * added here would be silently unwritable; one listed here that does not exist would make
+     * db:users fail.
+     */
+    public function test_id_table_columns_are_every_column_but_id(): void
+    {
+        foreach (Grants::ID_TABLE_COLUMNS as $table => $columns) {
+            $actual = $this->col(
+                'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? '
+                . "AND column_name <> 'id'",
+                [self::DATABASE, $table]
+            );
+            $expected = $columns;
+            sort($expected, SORT_STRING);
+            $this->assertSame($expected, $actual, $table);
+            $this->assertSame(
+                'auto_increment',
+                $this->col(
+                    'SELECT extra FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?',
+                    [self::DATABASE, $table, 'id']
+                )[0] ?? null,
+                "$table.id"
+            );
+        }
     }
 
     public function test_column_level_inserts(): void

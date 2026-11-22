@@ -46,6 +46,55 @@ trait Fixtures
         );
     }
 
+    /** A shared mailbox: no login password and no recovery email, by design (0007). */
+    protected function sharedMailbox(int $domainId, string $lp, string $status = 'active'): int
+    {
+        return $this->insertRow(
+            'INSERT INTO mailboxes (domain_id, local_part, password_hash, recovery_email, status, kind) '
+            . "VALUES (?, ?, NULL, NULL, ?, 'shared')",
+            [$domainId, $lp, $status]
+        );
+    }
+
+    /** An app password of a mailbox, live unless $revokedAt is given. */
+    protected function appPassword(int $mailboxId, string $name, ?string $revokedAt = null): int
+    {
+        return $this->insertRow(
+            'INSERT INTO app_passwords (mailbox_id, name, password_hash, revoked_at) VALUES (?, ?, ?, ?)',
+            [$mailboxId, $name, self::ARGON, $revokedAt]
+        );
+    }
+
+    /** Gives a member mailbox access to a shared mailbox. */
+    protected function sharedAccess(int $sharedId, int $memberId, bool $canRead = true, bool $canSend = false): void
+    {
+        $this->insertRow(
+            'INSERT INTO shared_access (shared_mailbox_id, member_mailbox_id, can_read, can_send) VALUES (?, ?, ?, ?)',
+            [$sharedId, $memberId, (int) $canRead, (int) $canSend]
+        );
+    }
+
+    /**
+     * Sets columns of one mailbox, for flags such as require_app_passwords or directory_visible.
+     * Column names are checked against a plain identifier pattern before they reach the SQL.
+     *
+     * @param array<string,mixed> $columns
+     */
+    protected function setMailbox(int $id, array $columns): void
+    {
+        $assignments = [];
+        foreach (array_keys($columns) as $column) {
+            if (preg_match('/^[a-z_]+\z/', $column) !== 1) {
+                throw new \InvalidArgumentException("Bad column name: $column");
+            }
+            $assignments[] = "`$column` = ?";
+        }
+
+        $this->pdo()
+            ->prepare('UPDATE mailboxes SET ' . implode(', ', $assignments) . ' WHERE id = ?')
+            ->execute([...array_values($columns), $id]);
+    }
+
     /**
      * An active alias with one target row per destination. $lp must not be empty.
      *
